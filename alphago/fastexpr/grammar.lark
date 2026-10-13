@@ -1,0 +1,72 @@
+// FASTEXPR (WorldQuant BRAIN alpha expression language), LALR(1).
+//
+// Comments, trailing semicolons and the unsupported '^' operator are handled in
+// parser.py before the text reaches lark.  Precedence, lowest to highest:
+//   ?:  <  ||  <  &&  <  == !=  <  < <= > >=  <  + -  <  * /  <  unary - ! +  <  call/atom
+
+program: statement (_SEMI+ statement)* _SEMI*
+
+?statement: assign
+          | expr
+
+assign: NAME "=" expr
+
+?expr: or_expr
+     | or_expr "?" expr ":" expr           -> ternary
+
+?or_expr: and_expr
+        | or_expr OR and_expr              -> binop
+
+?and_expr: eq_expr
+         | and_expr AND eq_expr            -> binop
+
+?eq_expr: rel_expr
+        | eq_expr (EQ | NE) rel_expr       -> binop
+
+?rel_expr: add_expr
+         | rel_expr (LE | GE | LT | GT) add_expr -> binop
+
+?add_expr: mul_expr
+         | add_expr (PLUS | MINUS) mul_expr -> binop
+
+?mul_expr: unary
+         | mul_expr (STAR | SLASH) unary   -> binop
+
+?unary: atom
+      | (MINUS | PLUS | BANG) unary        -> unary
+
+?atom: NUMBER                              -> number
+     | STRING                              -> string
+     | NAME                                -> var
+     | call
+     | "(" expr ")"
+
+call: NAME "(" [args] ")"
+
+args: arg ("," arg)*
+
+?arg: expr
+    | kwarg
+
+kwarg: NAME "=" expr
+
+OR: "||"
+AND: "&&"
+EQ: "=="
+NE: "!="
+LE: "<="
+GE: ">="
+LT: "<"
+GT: ">"
+PLUS: "+"
+MINUS: "-"
+STAR: "*"
+SLASH: "/"
+BANG: "!"
+_SEMI: ";"
+
+NUMBER: /(\d+(\.\d*)?|\.\d+)([eE][+-]?\d+)?/
+STRING: /"[^"\n]*"/ | /'[^'\n]*'/
+NAME: /[A-Za-z_][A-Za-z0-9_]*/
+
+%ignore /\s+/
