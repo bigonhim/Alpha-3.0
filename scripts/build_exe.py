@@ -10,6 +10,7 @@ Windows 10/11); without it, run `AlphaGo.exe --web` to use the browser instead o
 from __future__ import annotations
 
 import os
+import shutil
 import sys
 from pathlib import Path
 
@@ -59,6 +60,10 @@ def main() -> None:
     if icon.exists():
         args += ["--icon", str(icon)]
     PyInstaller.__main__.run(args)
+    # Ship the user guide and its screenshots next to the exe so a zipped copy of dist\AlphaGo is self-explanatory.
+    out = ROOT / "dist" / "AlphaGo"
+    shutil.copy2(ROOT / "USER_GUIDE.md", out / "USER_GUIDE.md")
+    shutil.copytree(ROOT / "docs" / "user-guide", out / "docs" / "user-guide", dirs_exist_ok=True)
     print(f"\nBuilt {ROOT / 'dist' / 'AlphaGo' / 'AlphaGo.exe'}")
 
 
