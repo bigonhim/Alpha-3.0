@@ -4,7 +4,7 @@ AlphaGo is a Windows desktop app for BRAIN consultants. It finds data, generates
 
 It is a local, single-user app. Your BRAIN password and Gemini key are kept in Windows Credential Manager, and all research data stays in a local SQLite database.
 
-**New to AlphaGo?** Start with the step-by-step [User guide](USER_GUIDE.md). This README is the reference.
+**New to AlphaGo?** Start with the step-by-step [AlphaGo User Guide](https://claude.ai/code/artifact/f3e8b974-8270-4943-9708-a60def579acd). This README is the reference.
 
 ---
 
@@ -115,7 +115,7 @@ Practitioner data (about 830 simulations per live alpha) shows that **correlatio
 ## 5. Compliance and safety
 
 - **API only.** The app never scrapes the website. It honours `Retry-After`, reduces concurrency on 429, and keeps a daily quota reserve (default 200 simulations, set in `settings.json`).
-- **Nothing is submitted without your click.** Super Alpha renames, Osmosis pushes and Power Pool bulk tag changes each ask for confirmation too. SPC prompts are never submitted by the app. Tag buttons and the AI description buttons write to BRAIN as soon as you click them (see the [User guide](USER_GUIDE.md#7-buttons-that-spend-quota-or-change-your-brain-account)).
+- **Nothing is submitted without your click.** Super Alpha renames, Osmosis pushes and Power Pool bulk tag changes each ask for confirmation too. SPC prompts are never submitted by the app. Tag buttons and the AI description buttons write to BRAIN as soon as you click them (see section 6 of the [AlphaGo User Guide](https://claude.ai/code/artifact/f3e8b974-8270-4943-9708-a60def579acd)).
 - **Assisted mode is the default.** Full Autopilot is capped at a daily number of simulations (default 500), and the top-bar **Stop all** button pauses everything.
 - **Background:** BRAIN's *Consultant Do's and Don'ts* lists "using automation to generate Alpha ideas" as a research don't. There is also a community report of a fully automated account being locked.
   - Full Autopilot is behind a warning you must accept.
