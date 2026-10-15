@@ -1,4 +1,4 @@
-"""LLM knowledge pack: a large, stable prompt prefix (benefits from Gemini implicit caching) + dynamic context."""
+"""LLM knowledge pack: a large, stable prompt prefix (benefits from provider prompt caching) + dynamic context."""
 
 from __future__ import annotations
 
@@ -66,7 +66,7 @@ async def operator_reference(limit: int = 220) -> str:
 
 
 async def static_prefix() -> str:
-    """Large, rarely-changing prefix: identical across calls so Gemini can cache it implicitly."""
+    """Large, rarely-changing prefix: identical across calls so the provider can cache it."""
     ops = await operator_reference()
     return "\n\n".join([
         "You are a senior quantitative researcher writing WorldQuant BRAIN alphas.",

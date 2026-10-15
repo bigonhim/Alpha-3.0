@@ -1,5 +1,5 @@
 """Near-miss optimiser: map each failing BRAIN check to targeted variants (settings sweeps + AST transforms),
-optionally plus a Gemini "refine" round that sees only the failing checks (AlphaGen-style)."""
+optionally plus an LLM "refine" round that sees only the failing checks (AlphaGen-style)."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ from ..db.models import Alpha, Candidate, OptimizationAttempt
 from ..events import bus
 from ..fastexpr import negate, scale_windows, validate, wrap
 from ..knowledge import pack
-from ..llm import gemini
+from ..llm import llm
 from ..llm.prompts import render
 from ..llm.schemas import IdeaBatch
 from .catalogs import get_catalog
@@ -115,7 +115,7 @@ async def llm_refine(a: Alpha, k: int = 4) -> list[CandidateSpec]:
                           fitness=a.fitness, turnover=a.turnover, returns=a.returns, drawdown=a.drawdown,
                           margin=a.margin, failing="\n".join(failing) or "- none (improve robustness)",
                           yearly=yearly_txt, dataset_context=ds_ctx)
-    batch = await gemini.generate_json(prompt, IdeaBatch, system=await pack.static_prefix(), role="refine",
+    batch = await llm.generate_json(prompt, IdeaBatch, system=await pack.static_prefix(), role="refine",
                                        purpose="refine")
     catalog = await get_catalog(s["region"], s["delay"], s["universe"])
     specs = []
@@ -138,7 +138,7 @@ async def optimize_alpha(alpha_id: str, *, rounds_hint: int = 1, batch_id: int |
                            dataset_id=(a.dataset_ids or [None])[0], hypothesis=f"Optimisation of {a.id}: {kind}",
                            rationale={"kind": kind})
              for e, st, kind in plan_variants(a, max_variants)]
-    if use_llm and gemini.configure():
+    if use_llm and llm.configure():
         try:
             specs += await llm_refine(a, k=3)
         except Exception as exc:

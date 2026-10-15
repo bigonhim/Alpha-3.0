@@ -362,6 +362,7 @@ class LLMCall(Base):
     __tablename__ = "llm_calls"
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     ts: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow, index=True)
+    provider: Mapped[str | None] = mapped_column(String(16))     # gemini | claude | openai | ollama (NULL = gemini)
     model: Mapped[str] = mapped_column(String(64))
     purpose: Mapped[str] = mapped_column(String(32))
     prompt_tokens: Mapped[int | None] = mapped_column(Integer)

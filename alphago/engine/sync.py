@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
@@ -10,6 +11,8 @@ from sqlalchemy import func, select
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from ..brain import brain
+from ..brain.data import gather_all
+from ..config import settings
 from ..db import db
 from ..db.models import (Alpha, ConsultantSnapshot, DataCategory, DataField, Dataset, Operator, Pyramid)
 from ..events import bus
@@ -98,9 +101,16 @@ def _cat(value: Any) -> tuple[str | None, str | None]:
 
 async def sync_datasets(ctx: JobContext | None, params: dict) -> str:
     region, delay, universe = params["region"], int(params["delay"]), params["universe"]
+    # Page BRAIN first, write after: the write lock is app-wide and not re-entrant, so holding it across the network
+    # calls stalled every other writer — and ctx.update() (which also writes) deadlocked the job at 25 datasets.
+    found: list[dict[str, Any]] = []
+    async for d in brain.data.datasets(region, delay, universe):
+        found.append(d)
+        if ctx and len(found) % 25 == 0:
+            await ctx.update(message=f"{len(found)} datasets")
     count = 0
     async with db.write() as s:
-        async for d in brain.data.datasets(region, delay, universe):
+        for d in found:
             cat_id, cat_name = _cat(d.get("category"))
             sub_id, sub_name = _cat(d.get("subcategory"))
             values = dict(id=str(d.get("id")), region=region, delay=delay, universe=universe, name=d.get("name"),
@@ -114,31 +124,43 @@ async def sync_datasets(ctx: JobContext | None, params: dict) -> str:
                 index_elements=["id", "region", "delay", "universe"],
                 set_={k: getattr(stmt.excluded, k) for k in values if k not in ("id", "region", "delay", "universe")}))
             count += 1
-            if ctx and count % 25 == 0:
-                await ctx.update(message=f"{count} datasets")
     await _mark(f"datasets:{region}:{delay}:{universe}")
     bus.publish("sync", f"Synced {count} datasets for {region} D{delay} {universe}.", "success")
     return f"{count} datasets"
 
 
-async def _upsert_fields(rows: list[dict[str, Any]], region: str, delay: int, universe: str) -> None:
+_FIELD_KEY = ("id", "region", "delay", "universe")
+
+
+async def _upsert_fields(rows: list[dict[str, Any]], region: str, delay: int, universe: str,
+                         dataset_pk: int | None = None) -> None:
+    """One executemany upsert per dataset; also stamps the dataset's fields_synced_at in the same transaction."""
+    values = []
+    for f in rows:
+        ds = f.get("dataset") or {}
+        _cid, cname = _cat(f.get("category"))
+        values.append(dict(id=str(f.get("id")), dataset_id=str(ds.get("id") if isinstance(ds, dict) else ds),
+                           region=region, delay=delay, universe=universe, type=str(f.get("type") or "MATRIX"),
+                           description=f.get("description"), category=cname, coverage=f.get("coverage"),
+                           user_count=f.get("userCount"), alpha_count=f.get("alphaCount"), themes=f.get("themes"),
+                           synced_at=now()))
     async with db.write() as s:
-        for f in rows:
-            ds = f.get("dataset") or {}
-            _cid, cname = _cat(f.get("category"))
-            values = dict(id=str(f.get("id")), dataset_id=str(ds.get("id") if isinstance(ds, dict) else ds),
-                          region=region, delay=delay, universe=universe, type=str(f.get("type") or "MATRIX"),
-                          description=f.get("description"), category=cname, coverage=f.get("coverage"),
-                          user_count=f.get("userCount"), alpha_count=f.get("alphaCount"), themes=f.get("themes"),
-                          synced_at=now())
-            stmt = sqlite_insert(DataField).values(**values)
+        if values:
+            stmt = sqlite_insert(DataField.__table__)
             await s.execute(stmt.on_conflict_do_update(
-                index_elements=["id", "region", "delay", "universe"],
-                set_={k: getattr(stmt.excluded, k) for k in values if k not in ("id", "region", "delay", "universe")}))
+                index_elements=list(_FIELD_KEY),
+                set_={k: getattr(stmt.excluded, k) for k in values[0] if k not in _FIELD_KEY}), values)
+        if dataset_pk is not None:
+            row = await s.get(Dataset, dataset_pk)
+            if row:
+                row.fields_synced_at = now()
 
 
 async def sync_fields(ctx: JobContext | None, params: dict) -> str:
-    """Fields for every dataset in scope (per-dataset paging avoids the 10,000-result cap)."""
+    """Fields for every dataset in scope (per-dataset paging avoids the 10,000-result cap).
+
+    A few datasets are worked on at once and each one's pages are fetched concurrently; one shared limiter keeps
+    the requests in flight at `brain.catalog_concurrency`."""
     region, delay, universe = params["region"], int(params["delay"]), params["universe"]
     only = params.get("dataset_ids")
     async with db.session() as s:
@@ -151,17 +173,22 @@ async def sync_fields(ctx: JobContext | None, params: dict) -> str:
                 Dataset.region == region, Dataset.delay == delay, Dataset.universe == universe)))
     if only:
         datasets = [d for d in datasets if d.id in set(only)]
-    total = 0
-    for i, ds in enumerate(datasets):
-        batch = [f async for f in brain.data.datafields(region, delay, universe, dataset_id=ds.id)]
-        await _upsert_fields(batch, region, delay, universe)
-        async with db.write() as s:
-            row = await s.get(Dataset, ds.pk)
-            if row:
-                row.fields_synced_at = now()
-        total += len(batch)
-        if ctx:
-            await ctx.update((i + 1) / len(datasets), f"{ds.id}: {len(batch)} fields ({total} total)")
+    width = max(1, int(settings.brain.catalog_concurrency))
+    limiter = asyncio.Semaphore(width)
+    pending = iter(datasets)                 # shared by the workers: each dataset is taken exactly once
+    done = total = 0
+
+    async def worker() -> None:
+        nonlocal done, total
+        for ds in pending:
+            batch = await brain.data.datafields_all(region, delay, universe, dataset_id=ds.id, limiter=limiter)
+            await _upsert_fields(batch, region, delay, universe, dataset_pk=ds.pk)
+            done += 1
+            total += len(batch)
+            if ctx:
+                await ctx.update(done / len(datasets), f"{ds.id}: {len(batch)} fields ({total} total)")
+
+    await gather_all(worker() for _ in range(min(width, len(datasets))))
     catalogs.invalidate((region, delay, universe))
     await _mark(f"fields:{region}:{delay}:{universe}")
     bus.publish("analyse", f"Catalogued {total:,} fields across {len(datasets)} datasets ({region} D{delay} {universe}).",
@@ -199,7 +226,8 @@ async def sync_alphas(ctx: JobContext | None, params: dict) -> str:
     max_unsubmitted = int(params.get("max_unsubmitted", 3000))
     total = 0
     page: list[dict[str, Any]] = []
-    async for item in brain.alphas.iterate({"status": "ACTIVE"}, order="-dateSubmitted"):
+    # dateCreated order lets the listing continue past BRAIN's first-1,000 cap (see AlphasAPI.iterate)
+    async for item in brain.alphas.iterate({"status": "ACTIVE"}, order="-dateCreated"):
         page.append(item)
         if len(page) >= 100:
             total += await _ingest_alpha_page(page)

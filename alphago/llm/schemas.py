@@ -1,4 +1,4 @@
-"""Structured-output schemas for Gemini (kept flat and simple: Gemini supports a JSON-schema subset)."""
+"""Structured-output schemas (kept flat and simple: each provider supports a different JSON-schema subset)."""
 
 from __future__ import annotations
 

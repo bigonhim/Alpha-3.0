@@ -5,7 +5,7 @@ from __future__ import annotations
 from ..db import db
 from ..db.models import Alpha, Candidate
 from ..knowledge import pack
-from ..llm import gemini
+from ..llm import llm
 from ..llm.prompts import render
 from ..llm.schemas import AlphaDescription
 
@@ -26,10 +26,10 @@ async def describe_alpha(alpha_id: str) -> str:
     if a is None:
         raise ValueError("unknown alpha")
     hypothesis = cand.hypothesis if cand else None
-    if not gemini.configure():
+    if not llm.configure():
         return fallback_description(a, hypothesis)
     prompt = await render("describe", expression=a.code, settings=pack.settings_text(a.settings or {}),
                           fields=", ".join(a.fields or []), hypothesis=hypothesis or "")
-    desc = await gemini.generate_json(prompt, AlphaDescription, role="describe", purpose="describe", thinking="low")
+    desc = await llm.generate_json(prompt, AlphaDescription, role="describe", purpose="describe", thinking="low")
     text = desc.render()
     return text if len(text) >= 100 else fallback_description(a, hypothesis)

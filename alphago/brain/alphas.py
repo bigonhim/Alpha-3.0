@@ -6,12 +6,28 @@ import asyncio
 import logging
 import time
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta
 from typing import Any, AsyncIterator
+from urllib.parse import quote, urlencode
 
 from .client import BrainClient
 from .errors import BrainError, describe_error_body
 
 log = logging.getLogger(__name__)
+
+LIST_CAP = 1000  # GET /users/self/alphas answers 400 "Cannot display more than the first 1,000 alphas" past this
+
+
+def _next_window(edge: str, *, descending: bool) -> str:
+    """Raw filter for the listing window after the alpha created at `edge` (an ISO time as BRAIN returned it).
+
+    Descending uses `dateCreated<` the next whole second, so alphas in the edge's own second are fetched again (and
+    skipped as seen) rather than lost; ascending uses `dateCreated>=` the edge itself."""
+    if descending:
+        bound = (datetime.fromisoformat(edge).replace(microsecond=0)
+                 + timedelta(seconds=1)).isoformat(timespec="seconds")
+        return f"dateCreated%3C{quote(bound, safe=':')}"
+    return f"dateCreated%3E={quote(edge, safe=':')}"
 
 
 @dataclass
@@ -135,19 +151,45 @@ class AlphasAPI:
 
     async def iterate(self, filters: dict[str, Any] | str | None = None, *, page_size: int = 100,
                       max_items: int | None = None, order: str = "-dateCreated") -> AsyncIterator[dict[str, Any]]:
-        offset = 0
-        seen = 0
+        """Every alpha matching `filters`, in `order`.
+
+        BRAIN serves only the first 1,000 results of a listing (HTTP 400 beyond). Ordered by dateCreated, the walk
+        carries on in windows: each next window filters dateCreated past the last alpha seen, and alphas sharing that
+        second are de-duplicated by id. Any other order cannot be windowed and raises at the cap."""
+        base = filters.replace("+", "%2B") if isinstance(filters, str) else urlencode(filters or {}, doseq=True)
+        windowed = order.lstrip("-") == "dateCreated"
+        window = ""
+        seen: set[str] = set()
+        yielded = 0
         while True:
-            page = await self.list_page(filters, limit=page_size, offset=offset, order=order)
-            results = page.get("results") or []
-            for item in results:
-                yield item
-                seen += 1
-                if max_items is not None and seen >= max_items:
+            offset = 0
+            fresh = 0
+            edge: str | None = None
+            while offset + page_size <= LIST_CAP:
+                query = "&".join(p for p in (f"limit={page_size}&offset={offset}&order={order}", base, window) if p)
+                page = await self.client.get_json(f"/users/self/alphas?{query}")
+                results = page.get("results") or []
+                for item in results:
+                    edge = item.get("dateCreated") or edge
+                    key = str(item.get("id"))
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    fresh += 1
+                    yield item
+                    yielded += 1
+                    if max_items is not None and yielded >= max_items:
+                        return
+                if not page.get("next") or not results:
                     return
-            if not page.get("next") or not results:
+                offset += page_size
+            if not windowed:
+                raise BrainError(f"BRAIN lists only the first {LIST_CAP:,} alphas when ordered by {order!r}; "
+                                 "order by dateCreated to read further.")
+            if not fresh or not edge:      # a whole window inside one second, or no dates: cannot move on safely
+                log.warning("alpha listing stopped after %d alphas: window did not advance", yielded)
                 return
-            offset += page_size
+            window = _next_window(edge, descending=order.startswith("-"))
 
     async def set_tag_list(self, name: str, alpha_ids: list[str]) -> dict[str, Any]:
         response = await self.client.request("POST", "/tags", json={"type": "LIST", "name": name, "alphas": alpha_ids})

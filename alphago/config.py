@@ -38,9 +38,23 @@ class BrainSettings(BaseModel):
     relogin_threshold_s: int = 1000   # re-login when session has fewer seconds left
     request_timeout_s: float = 60.0
     max_poll_minutes: int = 45        # give up polling a single simulation after this long
+    catalog_concurrency: int = 4      # data-fields requests in flight during a catalogue sync (1 = one at a time)
+
+
+class ProviderSettings(BaseModel):
+    """Connection and per-role models for one non-Gemini LLM provider (empty model = provider's automatic choice)."""
+    base_url: str = ""
+    ideation_model: str = ""
+    refine_model: str = ""
+    describe_model: str = ""
+    timeout_s: float = 0              # 0 = provider default
+    num_ctx: int = 32_768             # Ollama only: context window sent with every request (capped at the model's)
+    num_predict: int = 8_192          # Ollama only: max tokens per reply (bounds a runaway generation)
 
 
 class LLMSettings(BaseModel):
+    provider: str = "gemini"          # the one active provider: gemini | claude | openai | ollama
+    # Gemini's models per role (kept at the top level so older settings.json files load unchanged)
     ideation_model: str = ""          # empty = auto-pick the best available "flash" model
     refine_model: str = ""            # empty = auto-pick the strongest available model
     describe_model: str = ""
@@ -49,6 +63,9 @@ class LLMSettings(BaseModel):
     ideas_per_call: int = 8
     daily_call_budget: int = 400
     ai_language: str = "English"      # English | Hinglish (AI explanations only; numbers/expressions unchanged)
+    claude: ProviderSettings = Field(default_factory=ProviderSettings)
+    openai: ProviderSettings = Field(default_factory=lambda: ProviderSettings(base_url="https://api.openai.com/v1"))
+    ollama: ProviderSettings = Field(default_factory=lambda: ProviderSettings(base_url="http://localhost:11434"))
 
 
 class ResearchSettings(BaseModel):

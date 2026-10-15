@@ -227,8 +227,8 @@ async def genius_status() -> dict[str, Any]:
 
 
 async def genius_plan() -> dict[str, Any]:
-    """Ask Gemini to turn the Genius gaps into concrete, prioritised research goals ("Genius signals")."""
-    from ..llm import gemini
+    """Ask the LLM to turn the Genius gaps into concrete, prioritised research goals ("Genius signals")."""
+    from ..llm import llm
     from ..llm.prompts import render
     from ..llm.schemas import GeniusPlan
     st = await genius_status()
@@ -238,7 +238,7 @@ async def genius_plan() -> dict[str, Any]:
             f"combined performance {st['performance']} vs {st['performance_target']}")
     prompt = await render("genius", level=st["level"], target=st["target"], gaps=gaps, tiebreak=st["tiebreak"],
                           pyramids=pyr or "not synced", days_left=st["days_left"])
-    plan = await gemini.generate_json(prompt, GeniusPlan, role="refine", purpose="genius")
+    plan = await llm.generate_json(prompt, GeniusPlan, role="refine", purpose="genius")
     data = {"created": datetime.now(timezone.utc).isoformat(), "summary": plan.summary,
             "signals": [{**s.model_dump(), "done": False} for s in plan.signals]}
     await db.kv_set("genius_plan", data)

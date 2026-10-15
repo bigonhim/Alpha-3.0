@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timedelta, timezone
+from urllib.parse import unquote
 
 import httpx
 import pytest
@@ -11,7 +13,7 @@ import respx
 from alphago.brain import client as client_mod
 from alphago.brain.alphas import AlphasAPI
 from alphago.brain.client import BrainClient
-from alphago.brain.errors import AuthError, PersonaRequired
+from alphago.brain.errors import AuthError, BrainError, PersonaRequired
 from alphago.brain.options import SimOptions
 from alphago.brain.simulations import SimulationAPI, regular_payload, settings_hash
 from alphago.config import BrainSettings
@@ -182,6 +184,73 @@ async def test_check_long_poll():
     c = make_client()
     checks = await AlphasAPI(c).check("A1")
     assert {ch["name"] for ch in checks} == {"LOW_SHARPE", "SELF_CORRELATION"}
+    await c.close()
+
+
+def _alpha_listing(alphas: list[dict]):
+    """Mock GET /users/self/alphas with BRAIN's rule: 400 past the first 1,000 results of any one query."""
+    offsets: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        args, conds = {}, []
+        for part in request.url.query.decode().split("&"):
+            part = unquote(part)
+            if part.startswith("dateCreated>="):
+                conds.append((">=", datetime.fromisoformat(part[len("dateCreated>="):])))
+            elif part.startswith("dateCreated<"):
+                conds.append(("<", datetime.fromisoformat(part[len("dateCreated<"):])))
+            else:
+                key, _, value = part.partition("=")
+                args[key] = value
+        limit, offset = int(args["limit"]), int(args["offset"])
+        offsets.append(offset)
+        if offset + limit > 1000:
+            return httpx.Response(400, json={"detail": "Cannot display more than the first 1,000 alphas."})
+        rows = [a for a in alphas if a["status"] == args.get("status", a["status"])]
+        for op, bound in conds:
+            rows = [a for a in rows if (datetime.fromisoformat(a["dateCreated"]) < bound) == (op == "<")]
+        rows.sort(key=lambda a: datetime.fromisoformat(a["dateCreated"]), reverse=args["order"].startswith("-"))
+        page = rows[offset:offset + limit]
+        more = offset + limit < len(rows)
+        return httpx.Response(200, json={"count": len(rows), "next": "more" if more else None, "results": page})
+
+    return handler, offsets
+
+
+@pytest.mark.parametrize("order", ["-dateCreated", "dateCreated"])
+@respx.mock
+async def test_alpha_listing_walks_past_the_1000_cap(order):
+    start = datetime(2026, 3, 1, 9, 30, tzinfo=timezone(timedelta(hours=-5)))
+    # groups of three alphas share a second, so one group straddles the 1,000th result
+    alphas = [{"id": f"U{i:05d}", "status": "UNSUBMITTED",
+               "dateCreated": (start - timedelta(seconds=7 * (i // 3))).isoformat()} for i in range(2350)]
+    alphas += [{"id": f"A{i:03d}", "status": "ACTIVE", "dateCreated": start.isoformat()} for i in range(20)]
+    handler, offsets = _alpha_listing(alphas)
+    respx.post(f"{API}/authentication").mock(return_value=httpx.Response(201, json=AUTH_OK))
+    respx.get(f"{API}/users/self/alphas").mock(side_effect=handler)
+    c = make_client()
+    got = [a async for a in AlphasAPI(c).iterate({"status": "UNSUBMITTED"}, order=order)]
+    ids = [a["id"] for a in got]
+    assert len(ids) == len(set(ids)) == 2350 and all(i.startswith("U") for i in ids)
+    times = [datetime.fromisoformat(a["dateCreated"]) for a in got]
+    assert times == sorted(times, reverse=order.startswith("-"))
+    assert max(offsets) <= 900                      # never asked for a page BRAIN refuses
+    await c.close()
+
+
+@respx.mock
+async def test_alpha_listing_other_orders_stop_at_the_cap_with_a_clear_error():
+    start = datetime(2026, 3, 1, tzinfo=timezone.utc)
+    alphas = [{"id": f"U{i}", "status": "UNSUBMITTED", "dateCreated": (start - timedelta(minutes=i)).isoformat()}
+              for i in range(1200)]
+    handler, _ = _alpha_listing(alphas)
+    respx.post(f"{API}/authentication").mock(return_value=httpx.Response(201, json=AUTH_OK))
+    respx.get(f"{API}/users/self/alphas").mock(side_effect=handler)
+    c = make_client()
+    api = AlphasAPI(c)
+    assert len([a async for a in api.iterate(None, order="-is.sharpe", max_items=1000)]) == 1000
+    with pytest.raises(BrainError, match="first 1,000"):
+        [a async for a in api.iterate(None, order="-is.sharpe")]
     await c.close()
 
 

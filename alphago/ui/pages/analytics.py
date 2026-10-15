@@ -65,6 +65,6 @@ async def page() -> None:
                     rows=[{**r, "rate": f"{r['rate'] * 100:.1f}%", "avg": fmt_num(r["avg_sharpe"])} for r in rows]
                 ).props("dense flat").classes("w-full")
     with card("w-full"):
-        ui.label("Gemini calls per day").classes("ag-section-title")
+        ui.label("LLM calls per day").classes("ag-section-title")
         _chart({"xAxis": {"type": "category", "data": series["labels"], **AXIS}, "yAxis": {"type": "value", **AXIS},
                 "series": [{"type": "bar", "data": series["llm_calls"], "itemStyle": {"color": "#c084fc"}}]}, "h-56")

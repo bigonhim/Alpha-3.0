@@ -48,6 +48,11 @@ def main() -> None:
         "--collect-data", "tzdata",               # zoneinfo on Windows (US/Eastern quota day, Pacific Gemini day)
         "--collect-data", "lark",
         "--copy-metadata", "google-genai",
+        # Claude and OpenAI providers (imported lazily when the provider is configured)
+        "--collect-submodules", "anthropic",
+        "--copy-metadata", "anthropic",
+        "--collect-submodules", "openai",
+        "--copy-metadata", "openai",
         # SPC Lab PnL test: yfinance talks to Yahoo through curl_cffi (compiled libcurl + certificates)
         "--collect-all", "curl_cffi",
         "--collect-submodules", "yfinance",

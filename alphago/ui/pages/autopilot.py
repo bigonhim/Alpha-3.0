@@ -361,7 +361,7 @@ async def page() -> None:
     ui.timer(3.0, refresh)
 
     # ------------------------------------------------------------ AI idea batches (v1)
-    with ui.expansion("AI idea batches (Gemini, templates and mutations, ~12 ideas per batch)", icon="lightbulb",
+    with ui.expansion("AI idea batches (LLM ideas, templates and mutations, ~12 ideas per batch)", icon="lightbulb",
                       value=False).classes("w-full"):
         with ui.row().classes("w-full gap-5 items-stretch no-wrap"):
             with card("w-[60%]"):
@@ -403,7 +403,7 @@ async def page() -> None:
                     batch_lbl.set_text(f"Batch size: {int(batch.value)} ideas")
                     rounds_lbl.set_text(f"Max rounds (incl. optimisation): {int(rounds.value)}")
                     share_lbl.set_text(f"Use ≤ {share.value:.0%} of remaining quota")
-                    llm_lbl.set_text(f"Gemini ideas weight: {w_llm.value:.1f}")
+                    llm_lbl.set_text(f"LLM ideas weight: {w_llm.value:.1f}")
                     tpl_lbl.set_text(f"Template factory weight: {w_tpl.value:.1f}")
                     mut_lbl.set_text(f"Mutation / recombination weight: {w_mut.value:.1f}")
 

@@ -374,13 +374,13 @@ class ResearchManager:
 
         # ---------------- optimise near misses, check strong alphas, robustness
         await self._refresh(task_id, left_out, generated, stage="optimizing")
-        from ..llm import gemini
+        from ..llm import llm
         from .optimizer import optimize_alpha
         near = await self._top(task_id, ("promising",), 3)
         opt_ids: list[int] = []
         for a in near:
             try:
-                opt_ids += await optimize_alpha(a.id, use_llm=gemini.configure(), task_id=task_id)
+                opt_ids += await optimize_alpha(a.id, use_llm=llm.configure(), task_id=task_id)
             except Exception as exc:
                 log.warning("optimise %s failed: %s", a.id, exc)
         if opt_ids:
@@ -438,8 +438,8 @@ class ResearchManager:
             why = f"{focus} has the fewest strong alphas so far ({strong.get(focus, 0)}); new themes break correlation."
         pool = [x for x in rows if x["theme"] == focus] or rows
         plan = None
-        from ..llm import gemini
-        if gemini.configure() and any(x["rated"] for x in rows):
+        from ..llm import llm
+        if llm.configure() and any(x["rated"] for x in rows):
             try:
                 plan = await self._ai_plan(region, delay, universe, focus, strong, pool + [x for x in rows
                                                                                        if x not in pool][:15])
@@ -465,13 +465,13 @@ class ResearchManager:
 
     async def _ai_plan(self, region: str, delay: int, universe: str, focus: str, strong: dict[str, int],
                        pool: list[dict[str, Any]]) -> dict[str, Any] | None:
-        from ..llm import gemini
+        from ..llm import llm
         from ..llm.prompts import render
         from ..llm.schemas import ResearchPlan
         lines = "\n".join(f"- {x['id']} · {x['theme']} · AI {x['ai_score']} · {x['single']}/{x['double']}/"
                           f"{x['interaction']} · {x['alpha_count']} alphas · {x['tried']} mine · ×{x['pyramid_multiplier']}"
                           for x in pool[:40])
-        res = await gemini.generate_json(await render("research_plan", scope=f"{region} / D{delay} / {universe}",
+        res = await llm.generate_json(await render("research_plan", scope=f"{region} / D{delay} / {universe}",
                                                       focus=focus, strong_by_theme=strong or "none", datasets=lines),
                                          ResearchPlan, role="ideation", purpose="research_plan", thinking="low")
         valid = {x["id"] for x in pool}

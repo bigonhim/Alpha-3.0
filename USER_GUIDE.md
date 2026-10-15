@@ -1,16 +1,22 @@
 # AlphaGo User Guide
 
-_Last updated 14 October 2026. Screenshots use example data. An online copy you can comment on: [AlphaGo User Guide](https://claude.ai/code/artifact/f3e8b974-8270-4943-9708-a60def579acd)._
+_Last updated 15 October 2026. Screenshots use example data. An online copy you can comment on: [AlphaGo User Guide](https://claude.ai/code/artifact/f3e8b974-8270-4943-9708-a60def579acd)._
 
 ## 1. What AlphaGo is
 
-AlphaGo is a Windows desktop workstation for WorldQuant BRAIN consultants. It finds promising data, generates FASTEXPR alphas with Gemini and templates, and simulates them through the official BRAIN API. It then optimises near misses, runs BRAIN's own submission check, and submits **only when you click Submit to BRAIN** in a confirmation box.
+AlphaGo is a Windows desktop workstation for WorldQuant BRAIN consultants. It finds promising data, generates FASTEXPR alphas with an AI model of your choice (Gemini, Claude, OpenAI or a local Ollama model) and templates, and simulates them through the official BRAIN API. It then optimises near misses, runs BRAIN's own submission check, and submits **only when you click Submit to BRAIN** in a confirmation box.
 
 It is a local, single-user app:
 
-- Your BRAIN password and Gemini key live only in Windows Credential Manager (service `AlphaGo`).
+- Your BRAIN password and AI provider keys (Gemini, Anthropic, OpenAI) live only in Windows Credential Manager (service `AlphaGo`).
 - Every alpha, simulation and task is kept in a local SQLite database (alphago.db), and your settings in settings.json, both in `%APPDATA%\AlphaGo`.
-- Only BRAIN and Gemini are contacted, plus Yahoo Finance when you test an SPC prompt (tickers and dates only).
+- Only BRAIN and the AI provider you chose are contacted, plus Yahoo Finance when you test an SPC prompt (tickers and dates only). With a local Ollama model, AI prompts never leave your PC.
+
+### What's new on 15 October 2026
+
+- **Any AI model.** On **LLM Integration**, choose Gemini, Claude (Anthropic), OpenAI (or any OpenAI-compatible server) or a local Ollama model. One provider is active at a time; Gemini stays the default.
+- **Sync everything for scope no longer hangs.** It used to stop at "25 datasets"; field pages are now also fetched four at a time.
+- **Sync my alphas works past 1,000 alphas.** BRAIN lists at most 1,000 alphas per request, so AlphaGo now reads larger accounts in date windows.
 
 > **The one rule to remember:** AlphaGo never submits an alpha by itself, in any mode. Every submission starts with your click on **Submit to BRAIN** in the confirmation box. (Retrying a failed Submit job on Tasks re-sends that same confirmed submission.)
 
@@ -21,7 +27,7 @@ It is a local, single-user app:
 | Sign in to BRAIN (including biometric verification) and load the settings your account may use | Sync with BRAIN |
 | Download operators, datasets and fields, so expressions are checked locally before they cost quota | Sync with BRAIN |
 | Know which datasets to research next, rated by AI for Single, Double and Interaction use | Dataset Intelligence |
-| Turn a dataset into ideas (Gemini or templates) and simulate the ones you leave ticked; double-click a field to probe it | Dataset Intelligence |
+| Turn a dataset into ideas (AI or templates) and simulate the ones you leave ticked; double-click a field to probe it | Dataset Intelligence |
 | Test your own expressions or a template across a grid of settings, with a robustness heatmap | Simulation Matrix |
 | Run large systematic searches (Search Lab, Double dataset · Pair, Interaction) on their own share of BRAIN's 8 slots | Tasks |
 | Have research planned for you each day, with your approval (Assisted) or without it (Full Autopilot) | Alpha Autopilot |
@@ -32,8 +38,8 @@ It is a local, single-user app:
 | Estimate which submitted alphas may fade out of sample | Out of Sample |
 | Build and test Systematic Predictions Challenge prompts | SPC Lab |
 | Build, simulate and submit a Super Alpha | Super Alphas |
-| See what happened, what worked and how many Gemini calls you used | Research History, Analytics, Dashboard |
-| Connect Gemini, choose models and edit prompt templates | LLM Integration |
+| See what happened, what worked and how many AI calls you used | Research History, Analytics, Dashboard |
+| Choose the AI provider (Gemini, Claude, OpenAI or Ollama), choose models and edit prompt templates | LLM Integration |
 
 ### Limits it respects for you
 
@@ -45,7 +51,8 @@ It is a local, single-user app:
 | Regular submissions per day | 4 | `programs.daily_regular_submissions` |
 | Super Alpha submissions per day | 1 | `programs.daily_super_submissions` |
 | Full Autopilot simulations per day | 500 | **Daily Autopilot cap** on Alpha Autopilot |
-| Gemini calls per day | 400 | **Daily call budget** on LLM Integration |
+| AI calls per day (cloud providers; local Ollama calls are not counted) | 400 | **Daily call budget** on LLM Integration |
+| Data-field requests at once during a catalogue sync | 4 | `brain.catalog_concurrency` |
 
 Sharpe and fitness limits come from BRAIN's own check results; AlphaGo's built-in values are used only when BRAIN gives none. Turnover pass or fail always comes from BRAIN's check.
 
@@ -59,7 +66,7 @@ Double-click `dist\AlphaGo\AlphaGo.exe` and the window opens in a few seconds. N
 | --- | --- |
 | Windows | Windows 10 or 11 with the Microsoft Edge WebView2 runtime (preinstalled on current Windows) |
 | BRAIN account | A consultant login. AlphaGo uses the official API only |
-| Gemini key (optional but recommended) | A free or paid Google AI Studio key from https://aistudio.google.com/apikey |
+| An AI provider (optional but recommended) | One of: a Google AI Studio key (https://aistudio.google.com/apikey); an Anthropic API key (https://console.anthropic.com); an OpenAI key, or the address of another OpenAI-compatible server; or Ollama installed on this PC (https://ollama.com) |
 | Python (source install only) | 3.11 or newer; built and tested on 3.13 |
 
 ### Start the app
@@ -106,11 +113,11 @@ Run only one copy at a time. Two copies would share the same database and the sa
 | What | Where |
 | --- | --- |
 | Research database `alphago.db`, settings `settings.json`, log `logs\alphago.log` | `%APPDATA%\AlphaGo` (paste into the Explorer address bar) |
-| BRAIN email and password, Gemini key | Windows Credential Manager, service `AlphaGo` |
+| BRAIN email and password, AI provider keys (Gemini, Anthropic, OpenAI) | Windows Credential Manager, service `AlphaGo` |
 
 - **Back up:** close AlphaGo normally (not from Task Manager), then copy `alphago.db` somewhere safe.
-- **Test profile:** set the `ALPHAGO_HOME` environment variable to another folder before starting. It still uses the same saved BRAIN login and Gemini key, so it spends the same account's quota.
-- **Move to another PC:** zip the whole `dist\AlphaGo` folder and unzip it there. To keep your history, copy `alphago.db` and `settings.json` into `%APPDATA%\AlphaGo` on the new PC. Sign in and add the Gemini key again; credentials never travel with the files.
+- **Test profile:** set the `ALPHAGO_HOME` environment variable to another folder before starting. It still uses the same saved BRAIN login and AI keys, so it spends the same account's quota.
+- **Move to another PC:** zip the whole `dist\AlphaGo` folder and unzip it there. To keep your history, copy `alphago.db` and `settings.json` into `%APPDATA%\AlphaGo` on the new PC. Sign in and add your AI key again; credentials never travel with the files.
 - **Build a fresh .exe from source:** `.venv\Scripts\python.exe scripts\build_exe.py` (add `--console` to keep a debug console).
 
 First time? Go straight to section 5, steps 1 to 4. They take about 10 minutes and spend one simulation.
@@ -159,13 +166,13 @@ The window has three parts: a header of live status chips, a sidebar with 17 pag
 
 #### Dataset Intelligence — where to look next
 
-Every dataset in the chosen **Region / Delay / Universe** is rated by Gemini when you press Rate datasets with AI (datasets with synced fields only). From 20 simulations on a dataset, its score is blended 75 / 25 with your own hit rate.
+Every dataset in the chosen **Region / Delay / Universe** is rated by your AI model when you press Rate datasets with AI (datasets with synced fields only). From 20 simulations on a dataset, its score is blended 75 / 25 with your own hit rate.
 
 ![Dataset Intelligence for USA / 1 / TOP3000: tiles, Top recommendations, Categories and the rated datasets table](docs/user-guide/04-dataset-intel.png)
 
 | Control | What it does |
 | --- | --- |
-| **Rate datasets with AI** | Background job: Gemini scores each not-yet-rated dataset 0–100 overall and for **Single**, **Double** and **Interaction** use, and gives it a recommended usage, a theme and a one-line reason |
+| **Rate datasets with AI** | Background job: the AI model scores each not-yet-rated dataset 0–100 overall and for **Single**, **Double** and **Interaction** use, and gives it a recommended usage, a theme and a one-line reason |
 | **Sync catalogue** | Downloads operators, datasets and fields for this scope |
 | **AI-brief top 5** | Writes AI briefs for the 5 highest-Opportunity datasets that have none |
 | Tiles, **Top recommendations**, **Categories** | Counts, the three highest-rated datasets (blended AI Score), and how many rated datasets fall in each theme |
@@ -201,7 +208,7 @@ Every dataset in the chosen **Region / Delay / Universe** is rated by Gemini whe
 | **Proposed tasks waiting for your approval** | Each with its reason, **Approve** or **Skip**. With daily planning on, proposals not approved on their day are skipped at the next reset |
 | **Research strategy** | Scope, focus, the reason for the latest plan, strong alphas by category |
 | Current task card | Stage bar (Analyzing → Generating → Simulating → Optimizing → Completed), counts, **Left out on purpose** with reasons |
-| **AI idea batches** (collapsed) | The older batch generator: goal, dataset strategy, batch size, rounds, quota share and the Gemini / template / mutation mix. In Manual and Assisted mode each batch waits for approval in an editable table; in Full Autopilot it runs without review, within the daily cap. Every batch is listed in **Batch history** |
+| **AI idea batches** (collapsed) | The older batch generator: goal, dataset strategy, batch size, rounds, quota share and the LLM / template / mutation mix. In Manual and Assisted mode each batch waits for approval in an editable table; in Full Autopilot it runs without review, within the daily cap. Every batch is listed in **Batch history** |
 
 #### Tasks — everything that runs
 
@@ -233,7 +240,7 @@ Double-click a row (or click its Alpha id) for the details window:
 | Check badges | Every BRAIN check with value / limit; hover for BRAIN's message |
 | **Check** | Runs BRAIN's full submission check, including self- and prod-correlation. Can take a minute or more |
 | **Submit…** | Opens the submit confirmation. Greyed out for alphas already ACTIVE |
-| **Optimise** | Queues up to 8 targeted variants plus up to 3 Gemini refinements. **Spends quota** |
+| **Optimise** | Queues up to 8 targeted variants plus up to 3 AI refinements. **Spends quota** |
 | **PnL & yearly stats** | PnL chart and a table of yearly results from BRAIN |
 | **Self-correlation** | Your highest correlation with your other alphas |
 | **Properties** | Name, tags, colour and description. **Write with AI** drafts the description; **Save to BRAIN** stores them (the description for regular alphas only) |
@@ -257,7 +264,7 @@ When BRAIN has not returned a Sharpe or fitness limit, AlphaGo uses a fallback f
 
 Shows your level and target, days left in the quarter, and three progress bars: **Signals this quarter**, **Pyramids lit** (3 or more submissions in a region × delay × category) and **Combined alpha performance**. Below them sit the tie-breakers (average operators and fields per alpha, distinct operators and fields, longest simulation streak).
 
-![Genius AI: Expert level, progress bars, pyramid map, pyramid candidates and the Gemini plan](docs/user-guide/15-genius.png)
+![Genius AI: Expert level, progress bars, pyramid map, pyramid candidates and the AI plan](docs/user-guide/15-genius.png)
 
 | Control | What it does |
 | --- | --- |
@@ -265,7 +272,7 @@ Shows your level and target, days left in the quarter, and three progress bars: 
 | **Edit level thresholds** | The community-reported thresholds (Expert 20 / 10 / 0.50, Master 120 / 30 / 1.00, Grandmaster 220 / 60 / 2.00 for signals / pyramids / performance). Correct them when BRAIN publishes new ones |
 | **Pyramid map** | Region/delay × category heatmap with alpha counts; green = lit |
 | **Pyramid candidates** | Ready or strong unsubmitted alphas that would advance an unlit pyramid. Double-click to open |
-| **Generate plan with Gemini** | Turns your gaps into concrete goals. Tick a goal when done; **Launch run** opens the Autopilot set to that region and the "pyramid gaps first" dataset strategy |
+| **Generate plan with AI** | Turns your gaps into concrete goals. Tick a goal when done; **Launch run** opens the Autopilot set to that region and the "pyramid gaps first" dataset strategy |
 
 #### Osmosis — weekly points
 
@@ -333,14 +340,14 @@ Follows the Super Alpha guide in three numbered steps (step 1 in the left card, 
 
 | Page | What it holds |
 | --- | --- |
-| **Research History** | The last 50 Autopilot runs (batch counts, strong and ready totals), and the **Idea journal**: every simulated idea with hypothesis, verdict, metrics and failing checks. Search and filter by verdict; double-click to open the alpha. Rejected and weak shapes are fed back to Gemini as "avoid" examples (up to 25 per region and dataset) |
-| **Analytics** | Simulations per day (30 days), AI success rate, Sharpe distribution, most frequent failing checks, yield by generator and by dataset (top 20), Gemini calls per day |
-| **LLM Integration** | Gemini key (**Save & test**, **Test connection**, **Forget key**), model per role (Ideation, Refinement, Descriptions; **Auto (best available)** by default), thinking level, ideas per call, daily call budget, starting requests per minute, language of AI explanations, usage chart, and the Jinja2 **Prompt templates** editor with **Reset to default** and **View knowledge pack** |
+| **Research History** | The last 50 Autopilot runs (batch counts, strong and ready totals), and the **Idea journal**: every simulated idea with hypothesis, verdict, metrics and failing checks. Search and filter by verdict; double-click to open the alpha. Rejected and weak shapes are fed back to the AI as "avoid" examples (up to 25 per region and dataset) |
+| **Analytics** | Simulations per day (30 days), AI success rate, Sharpe distribution, most frequent failing checks, yield by generator and by dataset (top 20), LLM calls per day |
+| **LLM Integration** | **Active provider** (Gemini, Claude, OpenAI / compatible, Ollama (local)), the provider's key or server URL (**Save & test**, **Test connection**, **Forget key**), for Ollama the **Context window**, model per role (Ideation, Refinement, Descriptions; **Auto** by default), thinking level, ideas per call, daily call budget (cloud providers), starting requests per minute, language of AI explanations, usage chart, and the Jinja2 **Prompt templates** editor with **Reset to default** and **View knowledge pack** |
 | **Sync with BRAIN** | **BRAIN account** sign-in (with the biometric verification box), **Simulation settings available to you** (live from BRAIN; **Refresh from BRAIN**), **Data catalogue** syncs per scope, **Your alphas & programs** syncs, and the last 8 sync tasks |
 
 ![Research History: Autopilot runs and the idea journal](docs/user-guide/22-research-history.png)
 
-![Analytics: simulations per day, success rate, Sharpe distribution, failing checks, yield tables and Gemini calls](docs/user-guide/23-analytics.png)
+![Analytics: simulations per day, success rate, Sharpe distribution, failing checks, yield tables and LLM calls](docs/user-guide/23-analytics.png)
 
 ## 4. A typical day
 
@@ -368,7 +375,7 @@ The screenshots in section 5 follow this day on USA · D1 · TOP3000.
 3. On Alpha Autopilot you approve #41. On Dataset Intelligence `fundamental6` is the top pick (AI score 84, best for Single), so you also try the template `group_rank(ts_rank({field}/cap, {window}), {group})` in the Simulation Matrix.
 4. By midday, task #40 (yesterday's Search Lab on the same dataset) has found alpha `Kq7mP2x`: Sharpe 1.62, fitness 1.21, turnover 18.4%.
 5. You run **Check**: every test passes, self-correlation 0.41. You let **Write with AI** draft the description, save it, and submit `Kq7mP2x`. It is your second regular submission today (2 of 4).
-6. Before you stop, Research History shows which ideas failed and why; rejected and weak shapes go to Gemini as "avoid" examples from now on.
+6. Before you stop, Research History shows which ideas failed and why; rejected and weak shapes go to the AI as "avoid" examples from now on.
 
 ### The longer rhythm
 
@@ -377,7 +384,7 @@ The screenshots in section 5 follow this day on USA · D1 · TOP3000.
 | Every week, before the Osmosis lock (default Sunday 23:59 New York; the tile shows your local time) | Osmosis | **Prepare data**, **Make best plan**, check each scope, **Send to BRAIN…** → **Apply** |
 | After the lock | Osmosis Review | **Refresh data**, read the mistakes, **Explain my mistakes** |
 | Every month, once the month's submissions are in | Power Pool | **Refresh data**, **Pick best alphas**, **Replace old with new pick → Apply** |
-| Every week or so during the quarter | Genius AI | **Sync from BRAIN**, check pyramids and signals, **Generate plan with Gemini**, **Launch run** on a gap (it opens Alpha Autopilot set up for that gap; start research there) |
+| Every week or so during the quarter | Genius AI | **Sync from BRAIN**, check pyramids and signals, **Generate plan with AI**, **Launch run** on a gap (it opens Alpha Autopilot set up for that gap; start research there) |
 | After syncs | Out of Sample | Look for **Fading** and **Overfit risk** alphas before you weight them in Osmosis |
 | When you have about 20 strong submitted alphas in one region | Super Alphas | Rename, preview, simulate, describe, submit (1 a day) |
 | Whenever you work on the SPC challenge | SPC Lab | Test and re-test prompts; paste the winner into BRAIN's form yourself |
@@ -411,23 +418,40 @@ Steps 1–4 run once; steps 5–12 make up each research day, and only step 12 s
 
 1. In **Data catalogue**, choose **Region** `USA`, **Delay** `1`, **Universe** `TOP3000`.
 2. Click **Sync everything for scope**. A job called "Catalogue USA D1 TOP3000" downloads operators, datasets and fields (data categories have their own Data categories button).
-   - Fields take several minutes because BRAIN rate-limits them. Progress shows under **Recent sync tasks** and on **Tasks**.
+   - Fields still take a few minutes. AlphaGo fetches up to 4 pages at a time (`brain.catalog_concurrency` in settings.json; set it to 1 if BRAIN throttles you). Progress shows under **Recent sync tasks** and on **Tasks**.
    - The line under the buttons counts up as it runs: "Local catalogue: … operators · … dataset scopes · … fields".
 3. In **Your alphas & programs**, click **Sync my alphas** (all submitted alphas plus recent unsubmitted ones), then **Pyramids & Genius**. **Full alpha sync** fetches everything if you need it.
+   - BRAIN lists at most 1,000 alphas per request. AlphaGo reads larger accounts in windows of creation dates, so every alpha is fetched exactly once.
 4. Repeat 1–2 for every region you research.
 
 The catalogue is what lets AlphaGo reject an unknown field or a wrong operator **before** it costs a simulation.
 
-#### Step 3. Connect Gemini (LLM Integration)
+#### Step 3. Connect an AI model (LLM Integration)
 
-1. Create a key at https://aistudio.google.com/apikey.
-2. Open **LLM Integration**, paste the key into **Gemini API key** and click **Save & test**.
-3. **Status: ok** turns green within a few seconds, and the three model selectors list your models: **Ideation (bulk ideas)**, **Refinement (near misses)** and **Descriptions**. Leave them on **Auto (best available)**.
-4. Optional: lower **Daily call budget** (default 400) or change **Thinking level** (default low).
+1. Open **LLM Integration** and choose the **Active provider**. Every AI feature uses that one provider; Gemini is the default.
+2. Give AlphaGo what that provider needs, then click **Save & test**:
 
-AlphaGo starts at 6 requests a minute and adapts its pace by itself whenever Gemini answers 429 (rate-limited).
+   | Provider | What to enter |
+   | --- | --- |
+   | **Gemini (Google AI Studio)** | A key from https://aistudio.google.com/apikey in **Gemini API key** |
+   | **Claude (Anthropic)** | A key from https://console.anthropic.com in **Anthropic API key** |
+   | **OpenAI / compatible** | An OpenAI key. For OpenRouter, Groq, DeepSeek, LM Studio, vLLM or any other server with the OpenAI chat API, change **Server URL** too; local servers usually need no key |
+   | **Ollama (local)** | Install Ollama from https://ollama.com and download a model with `ollama pull <model>`. Keep the server URL `http://localhost:11434` |
 
-![LLM Integration: Status ok, model per role, pacing and budget with the usage chart](docs/user-guide/02-llm.png)
+3. **status: ok** turns green, and the three model selectors list the provider's models: **Ideation (bulk ideas)**, **Refinement (near misses)** and **Descriptions**.
+   - Gemini, Claude and Ollama: you can leave them on **Auto**. Claude's Auto is Claude Opus 5.5 for every role; Sonnet 5.5 or Haiku 5.5 cost less. Ollama's Auto is the first installed model.
+   - OpenAI / compatible: choose a model for each role, then click **Test connection** again. You can also type a model name the server does not list.
+4. Optional: lower **Daily call budget** (default 400, cloud providers only) or change **Thinking level** (default low).
+
+Cloud providers start at 6 requests a minute, and AlphaGo slows down by itself whenever the provider answers 429 (rate-limited). An Ollama model runs on your PC, one request at a time, with no rate limit and no budget.
+
+**Before you rely on a local model:**
+
+- **Context window** (default 32,768 tokens) must hold the knowledge pack plus a dataset's fields, often 15–20k tokens. AlphaGo warns you when a prompt is cut.
+- Each reply is capped at 8,192 tokens (`llm.ollama.num_predict`), so a model stuck in a loop stops with a clear error instead of running for many minutes.
+- Speed and quality depend on your hardware and the model. In a test on a PC with no graphics card, the 270-million-parameter `gemma3:270m` took about 4 minutes for one ideation call, and none of its expressions passed the validator. Use a larger model, ideally on a GPU. The validator rejects invalid expressions before they cost any simulations.
+
+![LLM Integration with Ollama (local) active: server URL, context window, model per role, and the pacing card showing a local model](docs/user-guide/02-llm.png)
 
 #### Step 4. Run one test simulation (Simulation Matrix)
 
@@ -482,7 +506,7 @@ This proves the whole chain works on your account for one simulation.
 
 **C. A handful of AI ideas**
 
-1. In the dataset panel, click **Generate AI ideas** (or **Template ideas** for 12 without Gemini).
+1. In the dataset panel, click **Generate AI ideas** (or **Template ideas** for 12 without AI).
 2. A dialog lists each expression with its hypothesis, all ticked. Untick what you don't want.
 3. Click **Simulate selected**. One simulation per ticked idea not simulated before.
 
@@ -524,7 +548,7 @@ This proves the whole chain works on your account for one simulation.
 5. If the verdict is still `strong`, click **Check** and wait; the window reopens with fresh badges.
 6. Click **PnL & yearly stats**. Look for a steady PnL line and no single year carrying the result.
 7. Click **Self-correlation**: "Self-correlation max 0.410 across … of your alphas."
-8. A `promising` alpha instead? Click **Optimise** to queue up to 11 variants (8 rule-based, up to 3 from Gemini), then come back to step 9.
+8. A `promising` alpha instead? Click **Optimise** to queue up to 11 variants (8 rule-based, up to 3 from the AI), then come back to step 9.
 
 ![Alpha details for Kq7mP2x: expression, settings, hypothesis, metrics, all checks passing and the action buttons](docs/user-guide/11-alpha-detail.png)
 
@@ -600,17 +624,19 @@ BRAIN's *Consultant Do's and Don'ts* lists "using automation to generate Alpha i
 | Alpha details | **Properties** → **Save to BRAIN** | You review the fields in the dialog first |
 | Tasks | **Retry selected** on a Submit, Osmosis or Power Pool tag job | No, repeats that job as it was confirmed |
 | Super Alphas | **Tag selected with code** | No, acts on click |
-| Power Pool (eligibility section) | **Write descriptions (AI) for selected** | No, writes on click (up to 25) and overwrites existing descriptions; without Gemini it writes a template description |
+| Power Pool (eligibility section) | **Write descriptions (AI) for selected** | No, writes on click (up to 25) and overwrites existing descriptions; without an AI provider it writes a template description |
 | Super Alphas | **Write descriptions (AI)** | No, saves to BRAIN, then shows you the text |
 
-**What leaves your PC:** BRAIN API calls; Gemini prompts (the knowledge pack of rules, your operators and templates; dataset and field descriptions; for idea generation, your best and rejected alpha expressions with their metrics; for refinement or descriptions, the alpha's expression and metrics; for the research and Genius plans, account statistics; Osmosis Review sends numbers only); and for SPC **Test PnL**, ticker symbols, the benchmark ticker and dates to Yahoo Finance.
+**What leaves your PC:** BRAIN API calls; prompts to the AI provider you chose, unless it is a local Ollama model (the knowledge pack of rules, your operators and templates; dataset and field descriptions; for idea generation, your best and rejected alpha expressions with their metrics; for refinement or descriptions, the alpha's expression and metrics; for the research and Genius plans, account statistics; Osmosis Review sends numbers only); and for SPC **Test PnL**, ticker symbols, the benchmark ticker and dates to Yahoo Finance.
 
 ### Settings you may want to change
 
 | Where | Setting | Default |
 | --- | --- | --- |
-| LLM Integration | Ideas per Gemini call (smaller calls give more varied ideas) | 8 |
-| LLM Integration | Daily call budget | 400 |
+| LLM Integration | Active provider | Gemini |
+| LLM Integration | Ideas per AI call (smaller calls give more varied ideas) | 8 |
+| LLM Integration | Daily call budget (cloud providers; Ollama is not counted) | 400 |
+| LLM Integration | Ollama context window | 32,768 tokens |
 | LLM Integration | Starting requests per minute (then adapts on its own) | 6 |
 | LLM Integration | Thinking level | low |
 | LLM Integration | Language of AI explanations | English |
@@ -628,6 +654,9 @@ Advanced settings live in `%APPDATA%\AlphaGo\settings.json`, created the first t
 | `brain.max_slots` | Concurrent multi-simulations | 8 |
 | `brain.multi_size` | Alphas per multi-simulation (2–10) | 10 |
 | `brain.max_poll_minutes` | Give up polling one simulation after this long | 45 |
+| `brain.catalog_concurrency` | Data-field requests in flight during a catalogue sync (1 = one at a time) | 4 |
+| `llm.ollama.num_predict` | Most tokens one Ollama reply may use | 8,192 |
+| `llm.ollama.timeout_s` | Seconds to wait for one Ollama reply (0 = 600) | 0 |
 | `programs.daily_regular_submissions` | Regular submissions per day (counted from AlphaGo only) | 4 |
 | `programs.daily_super_submissions` | Super Alpha submissions per day | 1 |
 | `programs.pp_max_corr` | Power Pool: picked alphas must correlate below this | 0.5 |
@@ -644,7 +673,12 @@ Advanced settings live in `%APPDATA%\AlphaGo\settings.json`, created the first t
 | Dropdowns show few or wrong universes | **Refresh from BRAIN** on **Sync with BRAIN** |
 | Validate says "unknown identifier '…' (not a data field in the catalog)" or "fields not synced: identifiers checked loosely" | **Sync everything for scope** for that region, delay and universe |
 | "No datasets with fields" when a task is planned, or "No fields synced for …" when it starts | Same: sync the catalogue for that scope |
-| Gemini rate-limited (429) or budget reached | Wait; pacing recovers by itself. Or raise **Daily call budget**, or use a paid tier |
+| The AI provider is rate-limited (429) or the budget is reached | Wait; pacing recovers by itself. Or raise **Daily call budget**, use a paid tier, or switch to a local Ollama model (not budgeted) |
+| "Ollama is not reachable at http://localhost:11434" | Start Ollama, or correct **Ollama server URL** on **LLM Integration** |
+| "No … model chosen" | On **LLM Integration**, pick a model for each role (OpenAI / compatible has no Auto when the server lists several models) |
+| Ollama warns that a prompt was cut, or "hit the 8,192-token reply limit" | Raise **Context window**, or use a larger model |
+| "Ollama did not answer within 600 s" | The model is too slow on this PC. Use a smaller or GPU-backed model, or raise `llm.ollama.timeout_s` |
+| "Claude declined this request" | Claude's safety check refused it. Try again, or switch provider for that task |
 | A job on **Tasks** failed | Read its message, fix the cause (usually sign-in), then **Retry selected**. A retried Submit, Osmosis or tag job runs without asking again |
 | A task says "Interrupted by an app restart — press Run to continue." | Tick it on **Tasks** and click **Resume** (or **Run All**) |
 | **Submit to BRAIN** is greyed out | Today's limit of submissions made from AlphaGo is reached (for example 4/4) |
@@ -657,7 +691,9 @@ Advanced settings live in `%APPDATA%\AlphaGo\settings.json`, created the first t
 
 **Does AlphaGo ever submit by itself?** No, in no mode, including Full Autopilot. Every submission starts with your click on **Submit to BRAIN**. The only way to repeat one without the dialog is **Retry selected** on its Submit job in **Tasks**, which re-sends that same confirmed submission.
 
-**Can I use it without Gemini?** Yes. Template ideas, the Simulation Matrix, research tasks and task planning work without it; planning falls back to a rule-based choice, and **Write with AI** and the Power Pool description button fall back to a template description. AI ratings, briefs, AI ideas, Gemini refinements, the Genius plan, Super Alpha descriptions and the Osmosis Review AI need a key.
+**Can I use it without an AI model?** Yes. Template ideas, the Simulation Matrix, research tasks and task planning work without one; planning falls back to a rule-based choice, and **Write with AI** and the Power Pool description button fall back to a template description. AI ratings, briefs, AI ideas, AI refinements, the Genius plan, Super Alpha descriptions and the Osmosis Review AI need a configured provider.
+
+**Which AI provider should I choose?** Any of them works with every AI feature, and you can switch at any time on **LLM Integration**. Cloud providers (Gemini, Claude, OpenAI) are fast but need an API key and count toward the daily budget. Ollama is free and keeps your prompts on your PC, but it needs a capable PC and a large enough model (see Step 3).
 
 **Why does the quota chip show 5,000 right after I start AlphaGo?** That is a placeholder. The real limit and remaining count come from BRAIN's response headers, so the chip is exact once BRAIN has answered after each start.
 
@@ -699,4 +735,4 @@ Advanced settings live in `%APPDATA%\AlphaGo\settings.json`, created the first t
 | SPC | Systematic Predictions Challenge: an LLM prompt entered in BRAIN's form that returns a list of stocks |
 | IS / OS | In-sample (the history BRAIN simulates) / out-of-sample (performance after submission) |
 | Persona | BRAIN's biometric identity check, completed in your browser |
-| Knowledge pack | The rules, your operators, thresholds and templates that AlphaGo sends to Gemini as the system instruction |
+| Knowledge pack | The rules, your operators, thresholds and templates that AlphaGo sends to the AI model as the system instruction |

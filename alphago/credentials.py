@@ -52,3 +52,18 @@ def gemini_key() -> str | None:
 
 def set_gemini_key(key: str | None) -> None:
     _set("gemini_api_key", key)
+
+
+_LLM_KEYS = {"gemini": "gemini_api_key", "claude": "anthropic_api_key", "openai": "openai_api_key"}
+
+
+def llm_key(provider: str) -> str | None:
+    """API key of an LLM provider (Ollama needs none)."""
+    name = _LLM_KEYS.get(provider)
+    return _get(name) if name else None
+
+
+def set_llm_key(provider: str, key: str | None) -> None:
+    name = _LLM_KEYS.get(provider)
+    if name:
+        _set(name, key)

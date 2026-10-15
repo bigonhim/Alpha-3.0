@@ -204,6 +204,9 @@ class BrainClient:
         self._set_state("logged_out")
 
     async def ensure_session(self) -> None:
+        if self._login_lock.locked():       # a concurrent request is signing in: wait and reuse its session
+            async with self._login_lock:
+                pass
         if self.state == "persona_required":
             raise PersonaRequired(self.persona_url or "")
         if not self.logged_in or self.seconds_left < self.cfg.relogin_threshold_s:

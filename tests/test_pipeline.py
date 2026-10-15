@@ -191,7 +191,7 @@ async def test_llm_ideas_chunks_by_ideas_per_call(tmp_path, monkeypatch):
         ideas.append(ideas[0])   # a duplicate inside the reply must be dropped
         return IdeaBatch(ideas=ideas)
 
-    monkeypatch.setattr(generators.gemini, "generate_json", fake_generate_json)
+    monkeypatch.setattr(generators.llm, "generate_json", fake_generate_json)
     monkeypatch.setattr(settings.llm, "ideas_per_call", 4)
     try:
         specs = await generators.llm_ideas({"region": "USA", "delay": 1, "universe": "TOP3000"}, dataset_id=None,

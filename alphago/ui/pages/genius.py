@@ -147,7 +147,7 @@ async def page() -> None:
                     finally:
                         btn.props(remove="loading")
 
-                btn = ui.button("Generate plan with Gemini", icon="auto_awesome", on_click=make_plan)
+                btn = ui.button("Generate plan with AI", icon="auto_awesome", on_click=make_plan)
             if not plan:
                 ui.label("No plan yet. The plan turns your gaps into concrete goals you can launch as targeted "
                          "Autopilot runs.").classes("ag-muted text-sm")

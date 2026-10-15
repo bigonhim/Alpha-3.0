@@ -11,34 +11,24 @@ import logging
 import random
 import re
 import time
-from datetime import datetime, timezone
 from typing import Any, TypeVar
-from zoneinfo import ZoneInfo
 
 from google import genai
 from google.genai import errors as genai_errors
 from google.genai import types
 from pydantic import BaseModel, ValidationError
-from sqlalchemy import func, select
 
 from ..config import settings
 from ..credentials import gemini_key
 from ..db import db
-from ..db.models import LLMCall
+from .base import LLMError, Pacer, log_call
+from .base import calls_today as _cloud_calls_today
 
 log = logging.getLogger(__name__)
 T = TypeVar("T", bound=BaseModel)
-PACIFIC = ZoneInfo("America/Los_Angeles")
 
 _EXCLUDE = ("embedding", "image", "tts", "audio", "live", "aqa", "imagen", "veo", "native", "robotics", "computer-use",
             "learnlm", "gemma")
-
-
-class LLMError(Exception):
-    def __init__(self, message: str, code: int | None = None) -> None:
-        super().__init__(message)
-        self.message = message
-        self.code = code
 
 
 def _version(name: str) -> tuple[float, ...]:
@@ -60,16 +50,21 @@ def _tier(name: str) -> int:
 
 
 class GeminiClient:
+    name = "gemini"
+    label = "Gemini"
+    local = False
+
     def __init__(self) -> None:
         self._client: genai.Client | None = None
         self._key: str | None = None
         self.models: list[dict[str, Any]] = []
-        self.rpm = settings.llm.start_rpm
-        self._next_slot = 0.0
-        self._lock = asyncio.Lock()
-        self._ok_streak = 0
+        self.pacer = Pacer(settings.llm.start_rpm)
         self.status = "unconfigured"
         self.last_error: str | None = None
+
+    @property
+    def rpm(self) -> float:
+        return self.pacer.rpm
 
     # ------------------------------------------------------------ setup
 
@@ -138,42 +133,26 @@ class GeminiClient:
     # ------------------------------------------------------------ budget & pacing
 
     async def calls_today(self) -> int:
-        start = datetime.now(PACIFIC).replace(hour=0, minute=0, second=0, microsecond=0).astimezone(timezone.utc)
-        async with db.session() as s:
-            return await s.scalar(select(func.count(LLMCall.id)).where(LLMCall.ts >= start)) or 0
+        return await _cloud_calls_today()
 
     async def _pace(self) -> None:
-        async with self._lock:
-            now = time.monotonic()
-            wait = self._next_slot - now
-            if wait > 0:
-                await asyncio.sleep(wait)
-            self._next_slot = max(now, self._next_slot) + 60.0 / max(0.2, self.rpm)
+        await self.pacer.wait()
 
     def _on_throttle(self) -> None:
-        self.rpm = max(0.5, self.rpm * 0.5)
-        self._ok_streak = 0
+        self.pacer.throttled()
         self.status = "rate_limited"
 
     def _on_success(self) -> None:
-        self._ok_streak += 1
+        self.pacer.succeeded()
         self.status = "ok"
-        if self._ok_streak >= 8:
-            self.rpm = min(60.0, self.rpm * 1.2)
-            self._ok_streak = 0
 
     async def _log(self, model: str, purpose: str, started: float, response: Any = None, error: str | None = None,
                    status: str = "ok") -> None:
         usage = getattr(response, "usage_metadata", None)
-        try:
-            async with db.write() as s:
-                s.add(LLMCall(model=model, purpose=purpose,
-                              prompt_tokens=getattr(usage, "prompt_token_count", None),
-                              output_tokens=getattr(usage, "candidates_token_count", None),
-                              cached_tokens=getattr(usage, "cached_content_token_count", None),
-                              latency_ms=int((time.monotonic() - started) * 1000), status=status, error=error))
-        except Exception:
-            log.exception("could not log LLM call")
+        await log_call(self.name, model, purpose, started,
+                       prompt_tokens=getattr(usage, "prompt_token_count", None),
+                       output_tokens=getattr(usage, "candidates_token_count", None),
+                       cached_tokens=getattr(usage, "cached_content_token_count", None), status=status, error=error)
 
     # ------------------------------------------------------------ generation
 

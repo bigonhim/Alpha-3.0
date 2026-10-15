@@ -1,4 +1,4 @@
-"""Dataset intelligence: opportunity scoring, Thompson-sampling dataset choice, Gemini dataset briefs, field probes."""
+"""Dataset intelligence: opportunity scoring, Thompson-sampling dataset choice, LLM dataset briefs, field probes."""
 
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ from ..db.models import Alpha, Candidate, DataField, Dataset, DatasetInsight, Da
 from ..events import bus
 from ..jobs.queue import JobContext, jobs
 from ..knowledge import pack
-from ..llm import gemini
+from ..llm import llm
 from ..llm.prompts import render
 from ..llm.schemas import DatasetBrief
 from .simulator import CandidateSpec, simulator
@@ -126,7 +126,7 @@ async def choose_dataset(region: str, delay: int, universe: str, strategy: str =
 async def analyze_dataset(dataset_id: str, region: str, delay: int, universe: str) -> DatasetBrief:
     ctx = await pack.dataset_context(dataset_id, region, delay, universe, max_fields=150)
     prompt = await render("dataset_brief", dataset_context=ctx)
-    brief = await gemini.generate_json(prompt, DatasetBrief, system=await pack.static_prefix(), role="ideation",
+    brief = await llm.generate_json(prompt, DatasetBrief, system=await pack.static_prefix(), role="ideation",
                                        purpose="dataset_brief")
     async with db.write() as s:
         stmt = sqlite_insert(DatasetInsight).values(
@@ -217,7 +217,7 @@ async def rate_datasets(region: str, delay: int, universe: str, *, only_missing:
         text = "\n".join([await _rating_context(d, region, delay, universe) for d in chunk])
         prompt = await render("dataset_rating", scope=f"{region} / D{delay} / {universe}", themes=", ".join(THEMES),
                               datasets=text)
-        res = await gemini.generate_json(prompt, DatasetRatingBatch, role="ideation", purpose="ds_rating",
+        res = await llm.generate_json(prompt, DatasetRatingBatch, role="ideation", purpose="ds_rating",
                                          thinking="low")
         valid = {d.id for d in chunk}
         async with db.write() as s:

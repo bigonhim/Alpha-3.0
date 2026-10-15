@@ -125,9 +125,9 @@ async def startup() -> None:
                  for r in rows])
     await brain.client.start()
     await _restore_options()
-    from .llm import gemini
-    gemini.configure()
-    await gemini.restore_models()
+    from .llm import llm
+    llm.configure()
+    await llm.restore_models()
     from .engine import sync  # noqa: F401  (registers job kinds)
     from . import services  # noqa: F401  (registers remaining job kinds / listeners)
     await simulator.start()

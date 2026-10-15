@@ -1,8 +1,8 @@
 # AlphaGo: a WorldQuant BRAIN alpha research desktop app
 
-AlphaGo is a Windows desktop app for BRAIN consultants. It finds data, generates FASTEXPR alphas with Gemini and templates, and simulates them through the official BRAIN API. It then optimises near-misses, runs BRAIN's own submission checks, and submits **only when you confirm**.
+AlphaGo is a Windows desktop app for BRAIN consultants. It finds data, generates FASTEXPR alphas with an LLM of your choice (Gemini, Claude, OpenAI or a local Ollama model) and templates, and simulates them through the official BRAIN API. It then optimises near-misses, runs BRAIN's own submission checks, and submits **only when you confirm**.
 
-It is a local, single-user app. Your BRAIN password and Gemini key are kept in Windows Credential Manager, and all research data stays in a local SQLite database.
+It is a local, single-user app. Your BRAIN password and LLM API keys are kept in Windows Credential Manager, and all research data stays in a local SQLite database.
 
 **New to AlphaGo?** Start with the step-by-step [User guide](USER_GUIDE.md), with screenshots of every page. This README is the reference.
 
@@ -38,7 +38,7 @@ python -m venv .venv
 | What | Where |
 |---|---|
 | Database (`alphago.db`), settings (`settings.json`), logs (`logs\alphago.log`) | `%APPDATA%\AlphaGo` |
-| BRAIN email, password and Gemini key | Windows Credential Manager, service `AlphaGo` |
+| BRAIN email, password and LLM API keys (Gemini, Anthropic, OpenAI) | Windows Credential Manager, service `AlphaGo` |
 
 - To use a different folder, set the `ALPHAGO_HOME` environment variable. This is handy for a test profile.
 - Back up the database by copying `alphago.db` while the app is closed.
@@ -53,10 +53,14 @@ python -m venv .venv
    - The header shows the session countdown and today's simulations left.
 2. **Sync with BRAIN**: choose your main scope (for example USA / 1 / TOP3000) and click **Sync everything for scope**. This syncs operators, data categories, datasets and fields.
    - Then click **Sync my alphas** and **Pyramids & Genius**.
-   - Field sync is rate-limited and can take a few minutes. Watch it on **Tasks**.
-3. **LLM Integration**: paste a Google AI Studio key (https://aistudio.google.com/apikey) and click **Save & test**.
-   - The test also loads the models your key can use, and the app picks one each for ideation, refinement and descriptions. You can change the picks.
-   - The app detects your tier and slows down on its own when Gemini returns 429.
+   - Field sync fetches up to 4 pages at a time (`catalog_concurrency` under `brain` in `settings.json`; 1 = one at a time) and can still take a few minutes. Watch it on **Tasks**.
+3. **LLM Integration**: choose the **Active provider**, then click **Save & test**. One provider is active at a time and every AI feature uses it.
+   - **Gemini**: paste a Google AI Studio key (https://aistudio.google.com/apikey).
+   - **Claude**: paste an Anthropic API key (https://console.anthropic.com). Auto uses Claude Opus 5.5 for every role; Sonnet 5.5 or Haiku 5.5 cost less.
+   - **OpenAI / compatible**: paste an OpenAI key, or change the server URL to OpenRouter, Groq, DeepSeek, LM Studio, vLLM or any other server with the OpenAI chat API (local servers usually need no key).
+   - **Ollama (local)**: install Ollama (https://ollama.com), run `ollama pull <model>`, and keep the default URL `http://localhost:11434`. Set **Context window** high enough for the knowledge pack plus a dataset's fields (15–20k tokens). Local calls don't count toward the daily budget.
+   - The test loads the models the provider offers, and the app picks one each for ideation, refinement and descriptions (OpenAI needs your pick). You can change the picks.
+   - Cloud providers are paced automatically: the app slows down when a provider returns 429.
 4. **Simulation Matrix**: replace the expressions with `rank(-ts_delta(close, 5))`, keep one neutralization and set **Decays** to `0`, so the preview reads 1 simulation. Click **Validate**, then **Run matrix**.
    - The result appears in the grid and on **Alphas**. This proves the whole pipeline works for your account.
 
@@ -70,7 +74,7 @@ python -m venv .venv
 | **Simulation Matrix** | One or more expressions × several settings (universe, neutralization, decay, truncation and more). Shows the quota cost first. Runs are packed into multi-simulations of 10 across the 8 slots. *Template* mode fills `{field}`, `{window}` and `{group}`. The heatmap shows whether an alpha is a robust plateau or a lucky spike. |
 | **Dataset Intelligence** | Datasets rated by AI for **Single / Double / Interaction** research, with top recommendations, a themes chart and usage/theme filters, blended with your own hit rate. Per dataset: AI brief, fields, idea generation, **Research task…**. |
 | **Alpha Autopilot** | Three modes: **Manual**, **Assisted** (default; proposed tasks wait for approval) and **Full Autopilot** (opt-in, within a daily simulation cap). Plans research tasks with a reason, shows the current task's stage bar and what was left out on purpose. The v1 AI idea batches (with approval) are in a collapsible section. |
-| **Genius AI** | Your quarterly Genius progress: signals, pyramids lit, combined performance and the tie-breakers. Includes a pyramid map, pyramid candidates, and a Gemini-written plan of concrete goals you can launch as targeted Autopilot runs. |
+| **Genius AI** | Your quarterly Genius progress: signals, pyramids lit, combined performance and the tie-breakers. Includes a pyramid map, pyramid candidates, and an AI-written plan of concrete goals you can launch as targeted Autopilot runs. |
 | **Osmosis** | **Prepare data** (submitted alphas + daily PnL), then **Make best plan** for all scopes: leaves out weak alphas (last-2y Sharpe < 0.5 or turnover > 50%), picks the alphas whose daily PnL combine best (Max 15/20/30/40), 100,000 points per scope. Combo Sharpe, PnL chart, editable points, CSV, confirmed push. Lock shown in local time. |
 | **Osmosis Review** | Points now on BRAIN, mistakes per scope, **Predict with AI** and **Explain my mistakes** (numbers only, English or Hinglish), plus allocation history. |
 | **Power Pool** | Monthly pick of the best Power-Pool-shaped submitted alphas per scope (max per scope, rating floor, PnL correlation < 0.5), then confirmed bulk tag changes. Ratings, Calmar, 2-year Sharpe, last-year PnL, sparklines. The v1 eligibility scanner stays in a collapsible section. |
@@ -79,9 +83,9 @@ python -m venv .venv
 | **Super Alphas** | Follows your Super Alpha guide: rename about 20 ACTIVE alphas to a code (for example `321`), select them with `name == '321'`, combine with `1`, preview, simulate, write the two descriptions (100+ characters each), then a confirmed submit. |
 | **Tasks** | Research tasks (Search Lab, Double dataset · Pair, Interaction) with cores, progress, best Sharpe, pause/stop/delete, **Run All / Stop All**, the Autopilot's daily plan, plus the simulation queue and background jobs. |
 | **Alphas** | Every alpha, from the app or synced. Double-click for details: metrics, check badges, PnL and yearly charts, self-correlation, optimise, properties and AI description, `/check`, and **Submit…**. |
-| **Research History** | Autopilot runs and the idea journal (hypothesis → verdict). Failed shapes become Gemini's "don't repeat" memory. |
-| **Analytics** | Simulations per day, success rate, Sharpe distribution, most frequent failing checks, yield by generator and dataset, and Gemini usage. |
-| **LLM Integration** | Gemini key, models per role, thinking level, call budget, rate-limit status, and the prompt-template editor with reset. |
+| **Research History** | Autopilot runs and the idea journal (hypothesis → verdict). Failed shapes become the AI's "don't repeat" memory. |
+| **Analytics** | Simulations per day, success rate, Sharpe distribution, most frequent failing checks, yield by generator and dataset, and LLM usage. |
+| **LLM Integration** | Active provider (Gemini, Claude, OpenAI / compatible, Ollama), its key or server, models per role, thinking level, call budget, rate-limit status, and the prompt-template editor with reset. |
 | **Sync with BRAIN** | Login (including Persona), allowed settings, and catalogue, alphas and programs syncs, with last-synced times. |
 
 **Verdicts used throughout**
@@ -146,7 +150,9 @@ These details are not publicly documented, so the app handles them as it goes ra
 | "BRAIN signed out" chip stays red | Sign in on **Sync with BRAIN**. If Persona is pending, finish verification in the browser. |
 | No universes or neutralizations to choose from | Sign in, or click **Sync with BRAIN → Refresh from BRAIN** in the allowed-settings card. |
 | "Field not found" during validation | **Sync everything for scope** for that region, delay and universe. |
-| Gemini 429 or budget reached | Wait. Pacing recovers automatically. Raise the daily budget on **LLM Integration**, or use a paid tier. |
+| LLM 429 or budget reached | Wait. Pacing recovers automatically. Raise the daily budget on **LLM Integration**, use a paid tier, or switch to a local Ollama model (not budgeted). |
+| "Ollama is not reachable" | Start Ollama (it runs at `http://localhost:11434` by default), or fix the server URL on **LLM Integration**. |
+| Ollama warns the prompt was cut | Raise **Context window** on **LLM Integration**, or use a model with a longer context. |
 | Native window does not open | Install the WebView2 runtime, or run with `--web`. |
 | Anything else | See `%APPDATA%\AlphaGo\logs\alphago.log`. |
 
@@ -165,8 +171,8 @@ These details are not publicly documented, so the app handles them as it goes ra
 |---|---|
 | `alphago/brain/` | Async BRAIN API client: auth and Persona, quota, adaptive slots, simulations, alphas, data, users. |
 | `alphago/fastexpr/` | Lark grammar, parser, validator, canonical and skeleton hashes, AST transforms. |
-| `alphago/knowledge/` | Operator signatures, templates, and the Gemini knowledge pack. |
-| `alphago/llm/` | Gemini client (model discovery, structured output, adaptive pacing), schemas, prompts. |
+| `alphago/knowledge/` | Operator signatures, templates, and the LLM knowledge pack. |
+| `alphago/llm/` | LLM router (`llm`) and providers — Gemini, Claude, OpenAI / compatible, Ollama — with structured output, adaptive pacing and the daily budget; schemas, prompts. |
 | `alphago/engine/` | Simulator service (per-task cores), evaluator, generators, optimiser, Autopilot, research tasks, daily PnL, portfolio logic (Osmosis plan/review, Power Pool pick), OOS outlook, SPC, programs, Super Alphas, stats. |
 | `alphago/jobs/` | Persistent background job queue. |
 | `alphago/ui/` | NiceGUI pages (one module per tab), layout, theme, shared components. |

@@ -1,4 +1,5 @@
-"""LLM Integration — Google AI Studio (Gemini) key, models per role, pacing, usage and prompt templates."""
+"""LLM Integration — the active AI provider (Gemini, Claude, OpenAI / compatible, local Ollama), its key or server,
+models per role, pacing, usage and prompt templates."""
 
 from __future__ import annotations
 
@@ -12,83 +13,143 @@ from ...config import settings
 from ...db import db
 from ...db.models import LLMCall
 from ...knowledge.pack import static_prefix
-from ...llm import LLMError, gemini
+from ...llm import PROVIDER_LABELS, PROVIDERS, LLMError, llm
 from ...llm.prompts import DEFAULTS, get_template, set_template
 from ..components import card, fmt_int, notify_error, page_header
 
+_KEY_LABEL = {"gemini": "Gemini API key (from aistudio.google.com)",
+              "claude": "Anthropic API key (from console.anthropic.com)",
+              "openai": "API key (leave empty for a local server that needs none)"}
+_URL_LABEL = {"openai": "Server URL (OpenAI, or OpenRouter, Groq, DeepSeek, LM Studio, vLLM …)",
+              "ollama": "Ollama server URL"}
+_ROLE_HELP = {"gemini": ("fast 'flash' model", "strongest model", "cheapest model"),
+              "claude": ("auto: Claude Opus 5.5 — Sonnet 5.5 / Haiku 5.5 cost less",) * 3,
+              "openai": ("any chat model the server lists",) * 3,
+              "ollama": ("auto: first installed model",) * 3}
+
+
+def _role_cfg(provider: str):  # noqa: ANN202
+    """Where a provider's per-role model choices live (Gemini's stay at the top level of settings.llm)."""
+    return settings.llm if provider == "gemini" else getattr(settings.llm, provider)
+
 
 async def page() -> None:
-    page_header("LLM Integration", "Google AI Studio (Gemini). The key is stored in Windows Credential Manager; "
-                                   "rate limits are learned automatically from 429 responses.")
+    page_header("LLM Integration", "Choose the AI provider — Google Gemini, Anthropic Claude, OpenAI (or any "
+                                   "OpenAI-compatible server) or a local Ollama model. Keys are stored in Windows "
+                                   "Credential Manager; cloud rate limits are learned automatically from 429 responses.")
     cfg = settings.llm
 
     with ui.row().classes("w-full gap-5 items-stretch no-wrap"):
         with card("w-[48%]"):
-            ui.label("API key & models").classes("ag-section-title")
-            has_key = bool(credentials.gemini_key())
-            key_in = ui.input("Gemini API key (from aistudio.google.com)", password=True, password_toggle_button=True,
-                              placeholder="●●●●●●●● saved" if has_key else "").classes("w-full")
+            ui.label("Provider, key & models").classes("ag-section-title")
+            choice = ui.select(PROVIDER_LABELS, value=cfg.provider if cfg.provider in PROVIDERS else "gemini",
+                               label="Active provider (used by every AI feature)").classes("w-80")
             status = ui.label().classes("text-sm")
+            body = ui.column().classes("w-full gap-2")
 
-            async def save_key() -> None:
-                if key_in.value:
-                    credentials.set_gemini_key(key_in.value.strip())
-                    key_in.value = ""
-                gemini.configure(credentials.gemini_key())
-                await test()
+            def render() -> None:
+                body.clear()
+                name = choice.value
+                provider = PROVIDERS[name]
+                with body:
+                    url_in = key_in = ctx_in = None
+                    if name in _URL_LABEL:
+                        url_in = ui.input(_URL_LABEL[name], value=getattr(cfg, name).base_url).classes("w-full")
+                    if name in _KEY_LABEL:
+                        key_in = ui.input(_KEY_LABEL[name], password=True, password_toggle_button=True,
+                                          placeholder="●●●●●●●● saved" if credentials.llm_key(name) else "").classes(
+                            "w-full")
+                    if name == "ollama":
+                        ctx_in = ui.number("Context window (tokens)", value=cfg.ollama.num_ctx, min=2048,
+                                           step=1024).classes("w-56")
+                        ui.label("Install Ollama from ollama.com and download a model with \"ollama pull <model>\". "
+                                 "Calls run on this PC, one at a time, and don't count toward the daily budget. "
+                                 "The knowledge pack plus a dataset's fields can need 15–20k tokens of context.").classes(
+                            "ag-muted text-sm")
 
-            async def test() -> None:
-                test_btn.props("loading")
-                try:
-                    msg = await gemini.test()
-                    ui.notify(msg, type="positive", multi_line=True)
+                    async def save_and_test() -> None:
+                        if url_in is not None:
+                            getattr(cfg, name).base_url = (url_in.value or "").strip()
+                        if ctx_in is not None:
+                            cfg.ollama.num_ctx = int(ctx_in.value or 32_768)
+                        settings.save()
+                        if key_in is not None and key_in.value:
+                            credentials.set_llm_key(name, key_in.value.strip())
+                            key_in.value = ""
+                        provider.configure(credentials.llm_key(name))
+                        await test()
+
+                    async def test() -> None:
+                        test_btn.props("loading")
+                        try:
+                            msg = await provider.test()
+                            ui.notify(msg, type="positive", multi_line=True)
+                            render_models()
+                        except LLMError as exc:
+                            notify_error(exc)
+                        except Exception as exc:
+                            notify_error(exc, f"{provider.label} test failed: ")
+                        finally:
+                            test_btn.props(remove="loading")
+
+                    def forget_key() -> None:
+                        credentials.set_llm_key(name, None)
+                        provider.configure(None)
+                        ui.notify(f"{provider.label} key removed.")
+
+                    with ui.row().classes("gap-2"):
+                        ui.button("Save & test", icon="key", on_click=save_and_test)
+                        test_btn = ui.button("Test connection", icon="bolt", on_click=test).props("flat")
+                        if name in _KEY_LABEL:
+                            ui.button("Forget key", icon="key_off", on_click=forget_key).props("flat color=grey")
+
+                    models_box = ui.column().classes("w-full gap-2 mt-2")
+
+                    def render_models() -> None:
+                        models_box.clear()
+                        rc = _role_cfg(name)
+                        names = [m["name"] for m in provider.models]
+                        chosen = [getattr(rc, a) for a in ("ideation_model", "refine_model", "describe_model")]
+                        options = {"": "Auto"} | {n: n for n in names} | {c: c for c in chosen if c}
+                        with models_box:
+                            if not names:
+                                ui.label("Models appear here after a successful test." +
+                                         (" You can also type a model name." if name in ("openai", "ollama") else "")
+                                         ).classes("ag-muted text-sm")
+                            for (role, attr), help_ in zip((("Ideation (bulk ideas)", "ideation_model"),
+                                                            ("Refinement (near misses)", "refine_model"),
+                                                            ("Descriptions", "describe_model")), _ROLE_HELP[name]):
+                                auto = provider.pick(attr.split("_")[0]) or "choose a model"
+                                sel = ui.select(options, value=getattr(rc, attr) if getattr(rc, attr) in options else "",
+                                                label=f"{role} — auto: {auto}", with_input=True,
+                                                new_value_mode="add-unique" if name in ("openai", "ollama") else None
+                                                ).classes("w-full")
+                                sel.on_value_change(lambda e, a=attr: (setattr(rc, a, e.value or ""), settings.save()))
+                                sel.tooltip(help_)
+                            think = ui.select({"minimal": "minimal", "low": "low", "medium": "medium", "high": "high",
+                                               "off": "off (older models)"}, value=cfg.thinking_level,
+                                              label="Thinking level (reasoning depth)").classes("w-64")
+                            think.on_value_change(lambda e: (setattr(cfg, "thinking_level", e.value), settings.save()))
+
                     render_models()
-                except LLMError as exc:
-                    notify_error(exc)
-                except Exception as exc:
-                    notify_error(exc, "Gemini test failed: ")
-                finally:
-                    test_btn.props(remove="loading")
 
-            def forget_key() -> None:
-                credentials.set_gemini_key(None)
-                gemini.configure(None)
-                ui.notify("Gemini key removed.")
+            def switch(e) -> None:  # noqa: ANN001
+                cfg.provider = e.value
+                settings.save()
+                PROVIDERS[e.value].configure()
+                ui.notify(f"AI features now use {PROVIDERS[e.value].label}.")
+                render()
 
-            with ui.row().classes("gap-2"):
-                ui.button("Save & test", icon="key", on_click=save_key)
-                test_btn = ui.button("Test connection", icon="bolt", on_click=test).props("flat")
-                ui.button("Forget key", icon="key_off", on_click=forget_key).props("flat color=grey")
-
-            models_box = ui.column().classes("w-full gap-2 mt-2")
-
-            def render_models() -> None:
-                models_box.clear()
-                names = [m["name"] for m in gemini.models]
-                options = {"": "Auto (best available)"} | {n: n for n in names}
-                with models_box:
-                    if not names:
-                        ui.label("Models appear here after a successful test.").classes("ag-muted text-sm")
-                    for role, attr, help_ in (("Ideation (bulk ideas)", "ideation_model", "fast 'flash' model"),
-                                              ("Refinement (near misses)", "refine_model", "strongest model"),
-                                              ("Descriptions", "describe_model", "cheapest model")):
-                        sel = ui.select(options, value=getattr(cfg, attr) if getattr(cfg, attr) in options else "",
-                                        label=f"{role} — auto: {gemini.pick(attr.split('_')[0])}").classes("w-full")
-                        sel.on_value_change(lambda e, a=attr: (setattr(cfg, a, e.value or ""), settings.save()))
-                        sel.tooltip(help_)
-                    think = ui.select({"minimal": "minimal", "low": "low", "medium": "medium", "high": "high",
-                                       "off": "off (older models)"}, value=cfg.thinking_level,
-                                      label="Thinking level (reasoning depth)").classes("w-64")
-                    think.on_value_change(lambda e: (setattr(cfg, "thinking_level", e.value), settings.save()))
-
-            render_models()
+            choice.on_value_change(switch)
+            render()
 
         with card("grow"):
             ui.label("Pacing & budget").classes("ag-section-title")
             pace = ui.label().classes("text-sm")
-            ideas = ui.number("Ideas per Gemini call", value=cfg.ideas_per_call, min=1, max=30).classes("w-56")
+            ideas = ui.number("Ideas per AI call", value=cfg.ideas_per_call, min=1, max=30).classes("w-56")
             ideas.on_value_change(lambda e: (setattr(cfg, "ideas_per_call", int(e.value or 8)), settings.save()))
-            budget = ui.number("Daily call budget", value=cfg.daily_call_budget, min=10).classes("w-56")
+            budget = ui.number("Daily call budget (cloud providers)", value=cfg.daily_call_budget, min=10).classes(
+                "w-64")
             budget.on_value_change(lambda e: (setattr(cfg, "daily_call_budget", int(e.value or 400)), settings.save()))
             start_rpm = ui.number("Starting requests / minute", value=cfg.start_rpm, min=0.5, step=0.5).classes("w-56")
             start_rpm.on_value_change(lambda e: (setattr(cfg, "start_rpm", float(e.value or 6)), settings.save()))
@@ -99,19 +160,21 @@ async def page() -> None:
             chart_box = ui.column().classes("w-full")
 
             async def refresh() -> None:
-                status.set_text(f"Status: {gemini.status}" + (f" — {gemini.last_error}" if gemini.last_error else ""))
+                p = llm.active
+                status.set_text(f"{p.label} · status: {p.status}" + (f" — {p.last_error}" if p.last_error else ""))
                 status.classes(replace="text-sm " + {"ok": "ag-green", "rate_limited": "ag-amber",
-                                                      "error": "ag-red"}.get(gemini.status, "ag-muted"))
-                pace.set_text(f"Current pacing: {gemini.rpm:.1f} requests/min (adaptive)")
+                                                      "error": "ag-red"}.get(p.status, "ag-muted"))
+                pace.set_text("Local model: no rate limit, one request at a time" if p.local
+                              else f"Current pacing: {p.rpm:.1f} requests/min (adaptive)")
                 since = datetime.now(timezone.utc) - timedelta(days=14)
                 async with db.session() as s:
-                    today = await gemini.calls_today()
+                    today = await llm.calls_today()
                     rows = (await s.execute(select(func.date(LLMCall.ts), func.count(LLMCall.id),
                                                    func.sum(LLMCall.prompt_tokens), func.sum(LLMCall.output_tokens))
                                             .where(LLMCall.ts >= since).group_by(func.date(LLMCall.ts)))).all()
                     errors = await s.scalar(select(func.count(LLMCall.id)).where(LLMCall.ts >= since,
                                                                                  LLMCall.status != "ok"))
-                usage.set_text(f"Calls today: {fmt_int(today)} / {fmt_int(cfg.daily_call_budget)} · "
+                usage.set_text(f"Cloud calls today: {fmt_int(today)} / {fmt_int(cfg.daily_call_budget)} · "
                                f"errors (14 d): {fmt_int(errors)}")
                 chart_box.clear()
                 if rows:
@@ -134,7 +197,7 @@ async def page() -> None:
         with ui.row().classes("items-center w-full"):
             ui.label("Prompt templates").classes("ag-section-title")
             ui.label("Jinja2 templates. The knowledge pack (rules, your operators, thresholds, templates) is sent as "
-                     "the system instruction so Gemini can cache it.").classes("ag-muted text-sm")
+                     "the system instruction so the provider can cache it.").classes("ag-muted text-sm")
         with ui.row().classes("w-full gap-4 no-wrap"):
             which = ui.select(list(DEFAULTS), value="ideation", label="Template").classes("w-56")
             editor = ui.textarea().classes("grow ag-mono").props("outlined autogrow input-style='min-height:260px'")

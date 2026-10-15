@@ -11,7 +11,7 @@ from ..brain.errors import SimulationRejected
 from ..brain.simulations import super_payload
 from ..db import db
 from ..events import bus
-from ..llm import gemini
+from ..llm import llm
 from ..llm.prompts import render
 from ..llm.schemas import SuperAlphaDescriptions
 from . import actions
@@ -74,7 +74,7 @@ async def simulate_super(selection: str, combo: str, settings: dict[str, Any], l
 
 async def write_descriptions(alpha_id: str, selection: str, combo: str, components: str) -> SuperAlphaDescriptions:
     prompt = await render("super_describe", selection=selection, combo=combo, components=components)
-    desc = await gemini.generate_json(prompt, SuperAlphaDescriptions, role="describe", purpose="super_describe",
+    desc = await llm.generate_json(prompt, SuperAlphaDescriptions, role="describe", purpose="super_describe",
                                       thinking="low")
     await brain.alphas.patch(alpha_id, selection_description=desc.selection_description,
                              combo_description=desc.combo_description)

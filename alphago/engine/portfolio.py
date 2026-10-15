@@ -286,23 +286,23 @@ async def review() -> list[ScopeReview]:
 
 
 async def ai_predict(scopes: list[ScopeReview], score_now: float | None, language: str):  # noqa: ANN201
-    from ..llm import gemini
+    from ..llm import llm
     from ..llm.prompts import render
     from ..llm.schemas import OsmosisPrediction
     prompt = await render("osmosis_predict", score_now="not given" if score_now is None else score_now,
                           numbers=review_numbers(scopes), language=language)
-    return await gemini.generate_json(prompt, OsmosisPrediction, role="refine", purpose="osmosis")
+    return await llm.generate_json(prompt, OsmosisPrediction, role="refine", purpose="osmosis")
 
 
 async def ai_explain(scopes: list[ScopeReview], language: str):  # noqa: ANN201
-    from ..llm import gemini
+    from ..llm import llm
     from ..llm.prompts import render
     from ..llm.schemas import OsmosisExplanation
     pr = settings.programs
     prompt = await render("osmosis_explain", numbers=review_numbers(scopes), language=language,
                           min_alphas=pr.osmosis_min_alphas, min_sharpe2y=pr.osmosis_leave_out_sharpe2y,
                           max_turnover=f"{pr.osmosis_leave_out_turnover:.0%}")
-    return await gemini.generate_json(prompt, OsmosisExplanation, role="refine", purpose="osmosis")
+    return await llm.generate_json(prompt, OsmosisExplanation, role="refine", purpose="osmosis")
 
 
 def review_numbers(scopes: list[ScopeReview]) -> str:

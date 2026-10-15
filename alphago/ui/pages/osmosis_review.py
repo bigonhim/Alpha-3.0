@@ -1,4 +1,4 @@
-"""Osmosis Review — check the points currently on BRAIN, spot mistakes, and ask Gemini what to expect and fix."""
+"""Osmosis Review — check the points currently on BRAIN, spot mistakes, and ask the AI what to expect and fix."""
 
 from __future__ import annotations
 
@@ -59,7 +59,7 @@ async def page() -> None:
     # ------------------------------------------------------------ prediction
     with card("w-full"):
         ui.label("Prediction: your next Osmosis result").classes("ag-section-title")
-        ui.label("Type the Osmosis score BRAIN shows you now. Gemini, acting as a quant finance expert, looks at the points "
+        ui.label("Type the Osmosis score BRAIN shows you now. Your AI model, acting as a quant finance expert, looks at the points "
                  "on BRAIN now and predicts your next Osmosis result. It is an estimate from in-sample data, not a "
                  "promise. Only numbers are sent, never expressions.").classes("ag-muted text-sm")
         with ui.row().classes("items-center gap-3 mt-2"):
@@ -110,7 +110,7 @@ async def page() -> None:
     # ------------------------------------------------------------ explanation
     with card("w-full"):
         ui.label("AI explanation").classes("ag-section-title")
-        ui.label("Gemini (or your model in LLM Integration) reads every scope's numbers and explains the main mistakes "
+        ui.label("Your AI model (chosen in LLM Integration) reads every scope's numbers and explains the main mistakes "
                  "and what to do next time. Only numbers are sent, never expressions.").classes("ag-muted text-sm")
         with ui.row().classes("items-center gap-3 mt-2"):
             lang_toggle(lang["value"], set_lang)

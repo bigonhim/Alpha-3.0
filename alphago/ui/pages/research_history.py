@@ -25,7 +25,7 @@ JOURNAL_COLUMNS = [
 
 async def page() -> None:
     page_header("Research History", "The idea journal: every simulated idea, its hypothesis and verdict. Failed shapes are "
-                                    "fed back to Gemini as 'don't repeat' memory.")
+                                    "fed back to the AI as 'don't repeat' memory.")
     with card("w-full"):
         ui.label("Autopilot runs").classes("ag-section-title")
         async with db.session() as s:

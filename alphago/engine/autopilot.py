@@ -25,7 +25,7 @@ from ..db import db
 from ..db.models import Alpha, AutopilotRun, Batch, Candidate
 from ..events import bus
 from ..fastexpr import scale_windows
-from ..llm import LLMError, gemini
+from ..llm import LLMError, llm
 from . import actions
 from .datasets import choose_dataset
 from .evaluator import promising_or_better
@@ -238,13 +238,14 @@ class Autopilot:
         base = {"neutralization": cfg.neutralization} if cfg.neutralization else {}
         specs: list[CandidateSpec] = []
         if n_llm:
-            if gemini.configure():
+            if llm.configure():
                 try:
-                    self.status_line = f"Asking Gemini for {n_llm} ideas ({move})…"
+                    self.status_line = f"Asking {llm.label} for {n_llm} ideas ({move})…"
                     specs += await llm_ideas(scope, dataset_id=dataset_id, n=n_llm, goal=GOALS.get(cfg.goal, cfg.goal),
                                              move=move, base_settings=base)
                 except LLMError as exc:
-                    bus.publish("generate", f"Gemini unavailable ({exc.message}); using templates instead.", "warning")
+                    bus.publish("generate", f"{llm.label} unavailable ({exc.message}); using templates instead.",
+                                "warning")
                     n_tpl += n_llm
             else:
                 n_tpl += n_llm

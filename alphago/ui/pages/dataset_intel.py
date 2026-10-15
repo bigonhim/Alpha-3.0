@@ -149,7 +149,7 @@ async def page() -> None:
             async def rate_ai() -> None:
                 await jobs.submit("rate_datasets", f"AI-rate datasets {region.value} D{delay.value} {universe.value}",
                                   scope())
-                ui.notify("Rating datasets with Gemini in the background (see Tasks).")
+                ui.notify("Rating datasets with AI in the background (see Tasks).")
 
             async def sync_scope() -> None:
                 if not brain.client.logged_in:

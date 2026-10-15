@@ -1,4 +1,4 @@
-"""Candidate generators: Gemini ideation (with a validator repair round), template factory, AST mutation/crossover."""
+"""Candidate generators: LLM ideation (with a validator repair round), template factory, AST mutation/crossover."""
 
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ from ..db.models import Alpha, DataField, Dataset
 from ..fastexpr import inline, parse, transforms, validate
 from ..knowledge import pack
 from ..knowledge.templates import factory, settings_for_category, third_order
-from ..llm import LLMError, gemini
+from ..llm import LLMError, llm
 from ..llm.prompts import render
 from ..llm.schemas import AlphaIdea, IdeaBatch
 from .catalogs import get_catalog
@@ -79,7 +79,7 @@ async def llm_ideas(scope: dict[str, Any], *, dataset_id: str | None, n: int, go
                               themes=", ".join(call_themes), settings=pack.settings_text(base),
                               dataset_context=ds_ctx, examples="\n".join(examples), avoid="\n".join(avoid))
         try:
-            batch = await gemini.generate_json(prompt, IdeaBatch, system=system, role="ideation", purpose="ideation")
+            batch = await llm.generate_json(prompt, IdeaBatch, system=system, role="ideation", purpose="ideation")
         except LLMError:
             if not ideas:
                 raise
@@ -101,7 +101,7 @@ async def llm_ideas(scope: dict[str, Any], *, dataset_id: str | None, n: int, go
     if bad:  # one repair round, fed with the validator's messages
         errors = "\n".join(f"- {i.expression}\n  errors: {msg}" for i, msg in bad[:12])
         try:
-            fixed = await gemini.generate_json(await render("repair", errors=errors), IdeaBatch, system=system,
+            fixed = await llm.generate_json(await render("repair", errors=errors), IdeaBatch, system=system,
                                                role="ideation", purpose="repair", thinking="low")
             for idea in fixed.ideas:
                 if validate(idea.expression, catalog).ok:
