@@ -7,12 +7,13 @@ import random
 from dataclasses import dataclass
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from ..brain.simulations import normalize_settings
 from ..db import db
-from ..db.models import Alpha, Candidate, DataField, Dataset, DatasetInsight, DatasetRating, Pyramid, utcnow
+from ..db.models import (Alpha, Candidate, DataField, Dataset, DatasetInsight, DatasetRating, OptimizationAttempt,
+                          Pyramid, utcnow)
 from ..events import bus
 from ..jobs.queue import JobContext, jobs
 from ..knowledge import pack
@@ -36,10 +37,11 @@ class DatasetScore:
     field_count: int | None
     pyramid_multiplier: float | None
     tried: int
-    good: int
+    good: float           # survival-weighted successes (see survival_weight)
     analyzed: bool
     pyramid_alphas: int
     opportunity: float
+    passed: int = 0       # first-pass ideas whose lineage passed BRAIN's check (ready or submitted)
 
     def as_row(self) -> dict[str, Any]:
         return {k: getattr(self, k) for k in self.__dataclass_fields__}
@@ -63,17 +65,54 @@ def _split_counts(pairs) -> dict[str, int]:  # noqa: ANN001
     return out
 
 
+# repair, robustness and probe simulations are not new ideas: they neither count as tries nor as successes of their own
+NOT_FIRST_PASS = ("optimize", "robustness", "probe")
+
+
+def survival_weight(verdict: str | None, robust_state: str | None = None) -> float:
+    """How far an idea got: promising 0.1 · strong 0.3 · passed BRAIN's check but fragile 0.6 · passed (robust or
+    untested) 1.0 · submitted 1.0. Favours datasets that produce submittable alphas, not just good-looking ones."""
+    if verdict == "submitted":
+        return 1.0
+    if verdict == "ready":
+        return 0.6 if robust_state == "fragile" else 1.0
+    return {"strong": 0.3, "promising": 0.1}.get(verdict or "", 0.0)
+
+
+async def survival_by_dataset(region: str, delay: int) -> tuple[dict[str, int], dict[str, float], dict[str, int]]:
+    """(tries, weighted successes, ideas that passed BRAIN's check) per dataset, from first-pass ideas only. An idea
+    is credited with the best result of its repair lineage (a near miss the repair loop made submittable counts)."""
+    async with db.session() as s:
+        rows = (await s.execute(select(Candidate.dataset_id, Candidate.alpha_id, Alpha.verdict, Alpha.robust_state)
+                                .outerjoin(Alpha, Alpha.id == Candidate.alpha_id)
+                                .where(Candidate.region == region, Candidate.delay == delay,
+                                       Candidate.status == "done", Candidate.origin.notin_(NOT_FIRST_PASS)))).all()
+        roots = [aid for _, aid, _, _ in rows if aid]
+        lineage: dict[str, float] = {}
+        for i in range(0, len(roots), 400):
+            for root, verdict, robust in (await s.execute(
+                    select(OptimizationAttempt.root_alpha_id, Alpha.verdict, Alpha.robust_state)
+                    .join(Alpha, Alpha.id == OptimizationAttempt.child_alpha_id)
+                    .where(OptimizationAttempt.root_alpha_id.in_(roots[i:i + 400])))).all():
+                lineage[root] = max(lineage.get(root, 0.0), survival_weight(verdict, robust))
+    tried: dict[str, int] = {}
+    good: dict[str, float] = {}
+    passed: dict[str, int] = {}
+    for ds_key, aid, verdict, robust in rows:
+        w = max(survival_weight(verdict, robust), lineage.get(aid or "", 0.0))
+        for ds in str(ds_key or "").split(","):
+            if ds:
+                tried[ds] = tried.get(ds, 0) + 1
+                good[ds] = good.get(ds, 0.0) + w
+                passed[ds] = passed.get(ds, 0) + (w >= 0.6)
+    return tried, good, passed
+
+
 async def scored_datasets(region: str, delay: int, universe: str) -> list[DatasetScore]:
+    tried, good, passed = await survival_by_dataset(region, delay)
     async with db.session() as s:
         rows = list(await s.scalars(select(Dataset).where(Dataset.region == region, Dataset.delay == delay,
                                                           Dataset.universe == universe)))
-        tried = _split_counts((await s.execute(select(Candidate.dataset_id, func.count()).where(
-            Candidate.region == region, Candidate.delay == delay, Candidate.status == "done")
-            .group_by(Candidate.dataset_id))).all())
-        good = _split_counts((await s.execute(select(Candidate.dataset_id, func.count()).join(
-            Alpha, Alpha.id == Candidate.alpha_id).where(
-            Candidate.region == region, Candidate.delay == delay,
-            Alpha.verdict.in_(["promising", "strong", "ready", "submitted"])).group_by(Candidate.dataset_id))).all())
         analyzed = set(await s.scalars(select(DatasetInsight.dataset_id).where(
             DatasetInsight.region == region, DatasetInsight.delay == delay, DatasetInsight.universe == universe)))
         pyr = {(p.category_id, p.region, p.delay): p.alpha_count for p in await s.scalars(
@@ -84,8 +123,8 @@ async def scored_datasets(region: str, delay: int, universe: str) -> list[Datase
     uc = [math.log1p(r.user_count or 0) for r in rows]
     out = []
     for r in rows:
-        n, g = tried.get(r.id, 0), good.get(r.id, 0)
-        yield_rate = (g + 1) / (n + 4)  # Bayesian-smoothed share promising-or-better
+        n, g = tried.get(r.id, 0), round(good.get(r.id, 0.0), 2)
+        yield_rate = (g + 1) / (n + 4)  # Bayesian-smoothed survival-weighted success
         opp = (0.30 * _norm(mult, r.pyramid_multiplier) + 0.20 * _norm(vs, r.value_score)
                + 0.20 * (1 - _norm(ac, math.log1p(r.alpha_count or 0)))
                + 0.10 * (1 - _norm(uc, math.log1p(r.user_count or 0)))
@@ -94,7 +133,8 @@ async def scored_datasets(region: str, delay: int, universe: str) -> list[Datase
             opp *= 0.5
         out.append(DatasetScore(r.id, r.name or r.id, r.category_name, r.category_id, r.coverage, r.value_score,
                                 r.alpha_count, r.user_count, r.field_count, r.pyramid_multiplier, n, g,
-                                r.id in analyzed, pyr.get((r.category_id, region, delay), 0), round(opp * 100, 1)))
+                                r.id in analyzed, pyr.get((r.category_id, region, delay), 0), round(opp * 100, 1),
+                                passed.get(r.id, 0)))
     out.sort(key=lambda d: d.opportunity, reverse=True)
     return out
 
@@ -117,7 +157,7 @@ async def choose_dataset(region: str, delay: int, universe: str, strategy: str =
         scored = sorted(scored, key=lambda d: (d.alpha_count or 0))[:max(5, len(scored) // 3)]
 
     def draw(d: DatasetScore) -> float:
-        beta = rng.betavariate(d.good + 1, max(1, d.tried - d.good) + 1)
+        beta = rng.betavariate(d.good + 1, max(1.0, d.tried - d.good) + 1)
         return d.opportunity / 100 * 0.6 + beta * 0.4
 
     return max(scored[:60], key=draw)
@@ -126,8 +166,8 @@ async def choose_dataset(region: str, delay: int, universe: str, strategy: str =
 async def analyze_dataset(dataset_id: str, region: str, delay: int, universe: str) -> DatasetBrief:
     ctx = await pack.dataset_context(dataset_id, region, delay, universe, max_fields=150)
     prompt = await render("dataset_brief", dataset_context=ctx)
-    brief = await llm.generate_json(prompt, DatasetBrief, system=await pack.static_prefix(), role="ideation",
-                                       purpose="dataset_brief")
+    brief = await llm.generate_json(prompt, DatasetBrief, system=await pack.static_prefix(region, delay),
+                                    role="ideation", purpose="dataset_brief")
     async with db.write() as s:
         stmt = sqlite_insert(DatasetInsight).values(
             dataset_id=dataset_id, region=region, delay=delay, universe=universe, summary=brief.summary,

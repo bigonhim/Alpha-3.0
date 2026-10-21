@@ -88,7 +88,7 @@ async def _scope_alphas() -> dict[tuple[str, int], list[Alpha]]:
         rows = list(await s.scalars(select(Alpha).where(Alpha.status == "ACTIVE", Alpha.type == "REGULAR")))
     groups: dict[tuple[str, int], list[Alpha]] = defaultdict(list)
     for a in rows:
-        groups[(a.region or "?", int(a.delay or 1))].append(a)
+        groups[(a.region or "?", 1 if a.delay is None else int(a.delay))].append(a)
     return groups
 
 

@@ -229,6 +229,9 @@ class Candidate(Base):
     task_id: Mapped[int | None] = mapped_column(Integer)
     created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
     finished_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
+    cluster: Mapped[str | None] = mapped_column(String(32))             # economic idea (see engine/clusters.py)
+    llm_model: Mapped[str | None] = mapped_column(String(96))           # provider:model that proposed it
+    prompt_version: Mapped[int | None] = mapped_column(Integer)         # PromptVersion.id of the ideation prompt
 
 
 class Simulation(Base):
@@ -304,6 +307,19 @@ class Alpha(Base):
     field_count: Mapped[int | None] = mapped_column(Integer)
     raw: Mapped[Any] = mapped_column(JSON, nullable=True)
     updated_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow, onupdate=utcnow)
+    # --- research quality (all nullable: added to existing databases by the forward-only migration)
+    is_checks: Mapped[Any] = mapped_column(JSON, nullable=True)         # the simulation's own IS checks (/check overwrites `checks`)
+    robust_ratio: Mapped[float | None] = mapped_column(Float)           # worst neighbour Sharpe / Sharpe
+    robust_state: Mapped[str | None] = mapped_column(String(16))        # robust | fragile | unknown
+    est_self_corr: Mapped[float | None] = mapped_column(Float)          # local estimate from daily PnL vs submitted alphas
+    est_corr_with: Mapped[str | None] = mapped_column(String(32))       # the submitted alpha it is closest to
+    wf_ratio: Mapped[float | None] = mapped_column(Float)               # Sharpe of the last 20% of IS ÷ the first 80%
+    n_trials: Mapped[int | None] = mapped_column(Integer)               # simulations in the search that found it
+    n_eff: Mapped[int | None] = mapped_column(Integer)                  # distinct lineages in that search
+    dsr: Mapped[float | None] = mapped_column(Float)                    # deflated-Sharpe confidence (advisory)
+    os_retention_pred: Mapped[float | None] = mapped_column(Float)      # predicted OS/IS Sharpe from your history
+    cluster: Mapped[str | None] = mapped_column(String(32))             # economic idea (momentum, value, ...)
+    expanded_at: Mapped[datetime | None] = mapped_column(UTCDateTime)   # the repair loop expanded this alpha
 
 
 class OptimizationAttempt(Base):
@@ -314,6 +330,17 @@ class OptimizationAttempt(Base):
     kind: Mapped[str] = mapped_column(String(48))
     detail: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
+    # --- learning which repairs work (nullable; filled by the repair loop)
+    fix: Mapped[str | None] = mapped_column(String(48))                 # stable fix key, e.g. "decay_up"
+    target_check: Mapped[str | None] = mapped_column(String(48))        # the failing check the fix aimed at
+    depth: Mapped[int | None] = mapped_column(Integer)
+    root_alpha_id: Mapped[str | None] = mapped_column(String(32))
+    region: Mapped[str | None] = mapped_column(String(16))
+    parent_snapshot: Mapped[Any] = mapped_column(JSON, nullable=True)   # parent's metrics and IS checks
+    child_alpha_id: Mapped[str | None] = mapped_column(String(32))
+    child_score: Mapped[float | None] = mapped_column(Float)
+    outcome: Mapped[str | None] = mapped_column(String(16))             # success | failure | neutral
+    resolved_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
 
 
 class Submission(Base):
@@ -371,6 +398,36 @@ class LLMCall(Base):
     latency_ms: Mapped[int | None] = mapped_column(Integer)
     status: Mapped[str] = mapped_column(String(16), default="ok")
     error: Mapped[str | None] = mapped_column(Text)
+    error_kind: Mapped[str | None] = mapped_column(String(24))   # rate_limited | timeout | model_unavailable | ...
+    prompt_version: Mapped[int | None] = mapped_column(Integer)  # PromptVersion.id the prompt was rendered from
+
+
+class PromptVersion(Base):
+    """Every saved (or reset) version of a prompt template, so its results can be compared."""
+
+    __tablename__ = "prompt_versions"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    name: Mapped[str] = mapped_column(String(48), index=True)
+    text: Mapped[str] = mapped_column(Text)
+    source: Mapped[str] = mapped_column(String(16), default="user")    # default | user | restored
+    note: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
+
+
+class AuditEntry(Base):
+    """Append-only record of every action the app took on your BRAIN account (every non-GET request)."""
+
+    __tablename__ = "audit_log"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    ts: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow, index=True)
+    actor: Mapped[str] = mapped_column(String(48), default="system")   # you | autopilot | task:12 | optimizer | ...
+    action: Mapped[str] = mapped_column(String(32))                    # simulate | check | submit | properties | ...
+    method: Mapped[str] = mapped_column(String(8))
+    path: Mapped[str] = mapped_column(String(256))
+    status: Mapped[int | None] = mapped_column(Integer)
+    quota_cost: Mapped[int] = mapped_column(Integer, default=0)        # simulations this request spent
+    alpha_ids: Mapped[Any] = mapped_column(JSON, nullable=True)
+    detail: Mapped[str | None] = mapped_column(Text)
 
 
 class Job(Base):

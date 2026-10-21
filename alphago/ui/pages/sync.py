@@ -257,3 +257,93 @@ async def page() -> None:
 
     await refresh_lists()
     ui.timer(2.0, refresh_lists)
+    await alerts_and_background()
+
+
+async def alerts_and_background() -> None:
+    """Email alerts and running in the background (both off until you switch them on)."""
+    import asyncio
+
+    from ... import background
+    from ...engine import alerts
+
+    a = settings.alerts
+    with ui.row().classes("w-full gap-5 items-stretch no-wrap"):
+        with card("w-[55%]"):
+            ui.label("Email alerts").classes("ag-section-title")
+            ui.label("A message when an alpha passes BRAIN's check, a task finishes, the queue is stuck, the quota "
+                     "pauses, BRAIN asks for verification, or the AI provider keeps failing. Messages carry alpha IDs "
+                     "and counts only — never expressions or credentials.").classes("ag-muted text-xs")
+            on = ui.switch("Alerts on", value=a.enabled)
+            with ui.row().classes("gap-3 w-full"):
+                host = ui.input("SMTP server", value=a.smtp_host, placeholder="smtp.gmail.com").classes("w-56")
+                port = ui.number("Port", value=a.smtp_port, min=1, max=65535).classes("w-24")
+                sec = ui.select({"starttls": "STARTTLS", "ssl": "SSL", "none": "None"}, value=a.security,
+                                label="Security").classes("w-32")
+            with ui.row().classes("gap-3 w-full"):
+                user = ui.input("SMTP user", value=a.smtp_user).classes("w-56")
+                pw = ui.input("SMTP password (app password)", password=True, password_toggle_button=True,
+                              placeholder="●●●●●●●● saved" if alerts.smtp_password() else "").classes("w-56")
+            with ui.row().classes("gap-3 w-full"):
+                sender = ui.input("From (empty = SMTP user)", value=a.sender).classes("w-56")
+                to = ui.input("Send to", value=a.recipient).classes("w-56")
+            with ui.row().classes("gap-3 w-full flex-wrap"):
+                boxes = {k: ui.checkbox(label, value=a.triggers.get(k, True)) for k, label in alerts.TRIGGERS.items()}
+            with ui.row().classes("gap-3"):
+                quiet = ui.number("Same alert at most every (min)", value=a.quiet_minutes, min=1).classes("w-56")
+                stuck = ui.number("Stuck after (min)", value=a.stuck_minutes, min=5).classes("w-40")
+                hour = ui.number("Daily summary hour", value=a.summary_hour, min=0, max=23).classes("w-40")
+
+            def save() -> None:
+                a.enabled, a.smtp_host, a.smtp_port = bool(on.value), (host.value or "").strip(), int(port.value or 587)
+                a.security, a.smtp_user = sec.value, (user.value or "").strip()
+                a.sender, a.recipient = (sender.value or "").strip(), (to.value or "").strip()
+                a.triggers = {k: bool(b.value) for k, b in boxes.items()}
+                a.quiet_minutes, a.stuck_minutes = int(quiet.value or 30), int(stuck.value or 30)
+                a.summary_hour = int(hour.value or 18)
+                if pw.value:
+                    alerts.set_smtp_password(pw.value)
+                    pw.value = ""
+                settings.save()
+                ui.notify("Alert settings saved.", type="positive")
+
+            async def test() -> None:
+                save()
+                try:
+                    await alerts.send("Test alert", "If you can read this, AlphaGo's email alerts work.")
+                    ui.notify(f"Test email sent to {a.recipient}.", type="positive")
+                except Exception as exc:
+                    notify_error(exc, "Test email failed: ")
+
+            with ui.row().classes("gap-2"):
+                ui.button("Save", icon="save", on_click=save)
+                ui.button("Send test", icon="mail", on_click=test).props("flat")
+
+        with card("grow"):
+            ui.label("Run in the background").classes("ag-section-title")
+            ui.label("'Start with Windows' runs the engine without a window at logon (as you, so it can read your "
+                     "keys); open the UI at http://127.0.0.1:8090 whenever you want. Only one AlphaGo engine runs at "
+                     "a time. Your PC still has to be on.").classes("ag-muted text-xs")
+            status = ui.label().classes("text-sm")
+
+            async def refresh_status() -> None:
+                enabled = await asyncio.to_thread(background.autostart_enabled)
+                status.set_text("Start with Windows: ON" if enabled else "Start with Windows: off")
+
+            async def toggle(on_: bool) -> None:
+                try:
+                    msg = await asyncio.to_thread(background.set_autostart, on_)
+                    ui.notify(msg, type="positive")
+                except Exception as exc:
+                    notify_error(exc, "Task Scheduler: ")
+                await refresh_status()
+
+            with ui.row().classes("gap-2"):
+                ui.button("Start with Windows", icon="schedule", on_click=lambda: toggle(True)).props("flat")
+                ui.button("Don't start with Windows", icon="block", on_click=lambda: toggle(False)).props("flat")
+            awake = ui.checkbox("Keep the PC awake while simulations are queued or running",
+                                value=settings.service.keep_awake)
+            awake.on_value_change(lambda e: (setattr(settings.service, "keep_awake", bool(e.value)),
+                                             settings.save()))
+            ui.label(f"Command: {background.headless_command()}").classes("ag-mono text-xs ag-muted break-all")
+            await refresh_status()

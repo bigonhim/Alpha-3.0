@@ -52,6 +52,14 @@ class ProviderSettings(BaseModel):
     num_predict: int = 8_192          # Ollama only: max tokens per reply (bounds a runaway generation)
 
 
+class TournamentSettings(BaseModel):
+    """Run the ideation prompt on several models and learn which one yields more promising/strong alphas per call."""
+    enabled: bool = False
+    contestants: list[str] = Field(default_factory=list)   # "provider:model", e.g. "gemini:gemini-3-flash"
+    min_ideas: int = 60               # simulated ideas per contestant before calls follow the results
+    locked: str = ""                  # "provider:model" chosen as the winner (empty = still competing)
+
+
 class LLMSettings(BaseModel):
     provider: str = "gemini"          # the one active provider: gemini | claude | openai | ollama
     # Gemini's models per role (kept at the top level so older settings.json files load unchanged)
@@ -63,6 +71,9 @@ class LLMSettings(BaseModel):
     ideas_per_call: int = 8
     daily_call_budget: int = 400
     ai_language: str = "English"      # English | Hinglish (AI explanations only; numbers/expressions unchanged)
+    self_check: bool = True           # one extra AI call per batch: critique the ideas, drop the worst (≤ 25%)
+    fallbacks: list[str] = Field(default_factory=list)   # providers tried in order when the primary fails (empty = off)
+    tournament: TournamentSettings = Field(default_factory=TournamentSettings)
     claude: ProviderSettings = Field(default_factory=ProviderSettings)
     openai: ProviderSettings = Field(default_factory=lambda: ProviderSettings(base_url="https://api.openai.com/v1"))
     ollama: ProviderSettings = Field(default_factory=lambda: ProviderSettings(base_url="http://localhost:11434"))
@@ -90,6 +101,13 @@ class ResearchSettings(BaseModel):
     task_cores: int = 4               # default cores (concurrent multi-simulations) per task
     task_sims: int = 500              # default planned simulations per task
     tasks_per_day: int = 2
+    # repair loop and certification (engine/refine.py)
+    optimize_share: float = 0.2       # share of a task's planned simulations reserved for repairing near misses
+    repair_depth: int = 3             # rounds of stacked fixes per near miss
+    check_cap: int = 15               # BRAIN /check runs per task or batch (a check costs no simulation quota)
+    duplicate_filter: bool = True     # leave out exact shape+field copies of your submitted alphas before simulating
+    cluster_share: float = 0.4        # max share of the day's simulations per economic idea (0 = no cap)
+    cluster_min: int = 150            # ... but never cap an idea below this many simulations a day
 
 
 class ProgramSettings(BaseModel):
@@ -132,8 +150,32 @@ class SPCSettings(BaseModel):
     benchmark: str = "SPY"
 
 
+class AlertSettings(BaseModel):
+    """Email alerts (SMTP). The password is kept in Windows Credential Manager, never in this file."""
+    enabled: bool = False
+    smtp_host: str = ""
+    smtp_port: int = 587
+    security: str = "starttls"        # starttls | ssl | none
+    smtp_user: str = ""
+    sender: str = ""                  # empty = the SMTP user
+    recipient: str = ""
+    triggers: dict[str, bool] = Field(default_factory=lambda: {
+        "ready": True, "task_finished": True, "stuck": True, "quota": True, "persona": True, "login_failed": True,
+        "llm_failing": True, "daily_summary": False})
+    quiet_minutes: int = 30           # the same alert at most once per this many minutes
+    stuck_minutes: int = 30           # queued simulations but none finished for this long = stuck
+    summary_hour: int = 18            # local hour of the daily summary (when switched on)
+
+
+class ServiceSettings(BaseModel):
+    """Running without the window (`--headless`)."""
+    keep_awake: bool = True           # keep the PC from sleeping while simulations are queued or running
+
+
 class AppSettings(BaseModel):
     brain: BrainSettings = Field(default_factory=BrainSettings)
+    alerts: AlertSettings = Field(default_factory=AlertSettings)
+    service: ServiceSettings = Field(default_factory=ServiceSettings)
     llm: LLMSettings = Field(default_factory=LLMSettings)
     research: ResearchSettings = Field(default_factory=ResearchSettings)
     programs: ProgramSettings = Field(default_factory=ProgramSettings)

@@ -9,7 +9,7 @@ from typing import Any
 from ..brain.simulations import settings_hash
 from ..db import db
 from ..db.models import Alpha, Candidate, JournalEntry
-from .evaluator import evaluate
+from .evaluator import blocking_failures, reverdict
 
 log = logging.getLogger(__name__)
 
@@ -82,7 +82,9 @@ def apply_alpha_json(row: Alpha, data: dict[str, Any], origin: str | None = None
         if key in is_:
             setattr(row, attr, is_.get(key))
     if is_.get("checks") is not None:
-        row.checks = is_.get("checks")
+        row.is_checks = is_.get("checks")
+        if row.checked_at is None:      # once BRAIN's full /check ran, `checks` keeps that result
+            row.checks = is_.get("checks")
     if is_.get("selfCorrelation") is not None:
         row.self_corr = is_.get("selfCorrelation")
     if is_.get("prodCorrelation") is not None:
@@ -97,9 +99,7 @@ def apply_alpha_json(row: Alpha, data: dict[str, Any], origin: str | None = None
         row.canonical_hash, row.skeleton_hash, row.op_count, row.fields = expression_hashes(row.code)
     if row.settings:
         row.settings_hash = settings_hash(row.settings)
-    ev = evaluate(sharpe=row.sharpe, fitness=row.fitness, turnover=row.turnover, checks=row.checks, delay=row.delay,
-                  region=row.region, status=row.status, full_check_passed=row.check_state == "pass")
-    row.verdict, row.score = ev.verdict, ev.score
+    reverdict(row)
     row.raw = {k: v for k, v in data.items() if k not in ("is", "os", "train", "test", "prod")}
     return row
 
@@ -122,9 +122,7 @@ async def upsert_alpha(data: dict[str, Any], *, candidate_id: int | None = None,
 
 
 async def journal(alpha: Alpha, cand: Candidate | None) -> None:
-    from .evaluator import evaluate as _ev
-    failing = _ev(sharpe=alpha.sharpe, fitness=alpha.fitness, turnover=alpha.turnover, checks=alpha.checks,
-                  delay=alpha.delay, region=alpha.region).failing
+    failing = blocking_failures(alpha.is_checks if alpha.is_checks is not None else alpha.checks)
     async with db.write() as s:
         s.add(JournalEntry(
             skeleton_hash=alpha.skeleton_hash, expression=alpha.code or "", hypothesis=cand.hypothesis if cand else None,

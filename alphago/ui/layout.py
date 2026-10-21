@@ -17,8 +17,9 @@ class NavItem:
 
 
 def _nav() -> list[NavItem]:
-    from .pages import (alphas, analytics, autopilot, dashboard, dataset_intel, genius, llm, osmosis, osmosis_review,
-                        oos, power_pool, research_history, simulation_matrix, spc_lab, super_alphas, sync, tasks)
+    from .pages import (alphas, analytics, audit, autopilot, dashboard, dataset_intel, genius, health, llm, osmosis,
+                        osmosis_review, oos, planner, power_pool, research_history, simulation_matrix, spc_lab,
+                        super_alphas, sync, tasks)
     return [
         NavItem("/", "Dashboard", "space_dashboard", "#a78bfa", dashboard.page),
         NavItem("/matrix", "Simulation Matrix", "grid_view", "#818cf8", simulation_matrix.page),
@@ -35,6 +36,9 @@ def _nav() -> list[NavItem]:
         NavItem("/alphas", "Alphas", "layers", "#818cf8", alphas.page),
         NavItem("/history", "Research History", "history", "#7dd3fc", research_history.page),
         NavItem("/analytics", "Analytics", "insights", "#818cf8", analytics.page),
+        NavItem("/planner", "Quota Planner", "calculate", "#fbbf24", planner.page),
+        NavItem("/health", "Health", "monitor_heart", "#4ade80", health.page),
+        NavItem("/audit", "Audit Log", "receipt_long", "#8b98ad", audit.page),
         NavItem("/llm", "LLM Integration", "auto_awesome", "#c084fc", llm.page),
         NavItem("/sync", "Sync with BRAIN", "sync", "#4ade80", sync.page),
     ]

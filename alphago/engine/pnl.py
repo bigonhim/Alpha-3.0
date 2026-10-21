@@ -136,8 +136,10 @@ async def save(alpha_id: str, dates: list[str], daily: list[float]) -> AlphaPnL:
     return row
 
 
-async def fetch(alpha_id: str, *, force: bool = False) -> AlphaPnL | None:
-    """Daily PnL for one alpha: stored row, else the legacy KV cache, else BRAIN's `pnl` record set."""
+async def fetch(alpha_id: str, *, force: bool = False, keep_raw: bool = True) -> AlphaPnL | None:
+    """Daily PnL for one alpha: stored row, else the legacy KV cache, else BRAIN's `pnl` record set.
+
+    keep_raw=False skips the raw copy in the KV table (used for research candidates, which are many)."""
     if not force:
         have = (await stored([alpha_id])).get(alpha_id)
         if have is not None:
@@ -145,7 +147,8 @@ async def fetch(alpha_id: str, *, force: bool = False) -> AlphaPnL | None:
     rows = None if force else await db.kv_get(f"pnl:{alpha_id}")
     if not rows:
         rows = await brain.alphas.recordset(alpha_id, "pnl")
-        await db.kv_set(f"pnl:{alpha_id}", rows)
+        if keep_raw:
+            await db.kv_set(f"pnl:{alpha_id}", rows)
     dates, daily = parse_records(rows or [])
     if not dates:
         return None

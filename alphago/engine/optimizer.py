@@ -1,30 +1,26 @@
-"""Near-miss optimiser: map each failing BRAIN check to targeted variants (settings sweeps + AST transforms),
-optionally plus an LLM "refine" round that sees only the failing checks (AlphaGen-style)."""
+"""Near-miss optimiser entry points: one-round repairs from the alpha page, the AI refine call and the decay rule.
+
+The fix library, the learned fix order and the multi-round repair loop live in engine/refine.py."""
 
 from __future__ import annotations
 
 import logging
 from typing import Any
 
-from ..brain import brain
 from ..brain.simulations import normalize_settings
 from ..db import db
 from ..db.models import Alpha, Candidate, OptimizationAttempt
 from ..events import bus
-from ..fastexpr import negate, scale_windows, validate, wrap
+from ..fastexpr import validate
 from ..knowledge import pack
 from ..llm import llm
 from ..llm.prompts import render
 from ..llm.schemas import IdeaBatch
 from .catalogs import get_catalog
-from .evaluator import evaluate
 from .generators import settings_from_idea
-from .simulator import CandidateSpec, simulator
+from .simulator import CandidateSpec
 
 log = logging.getLogger(__name__)
-
-RISK_NEUTRALIZATIONS = ["STATISTICAL", "CROWDING", "FAST", "SLOW", "SLOW_AND_FAST", "REVERSION_AND_MOMENTUM"]
-
 
 def retune_decay(decay: int, turnover: float | None) -> int:
     """machine_lib rule of thumb for turnover → decay."""
@@ -44,65 +40,20 @@ def retune_decay(decay: int, turnover: float | None) -> int:
     return decay
 
 
-def _src(p: Any) -> str:
-    return p.to_source() if hasattr(p, "to_source") else str(p)
-
-
 def plan_variants(a: Alpha, max_variants: int = 10) -> list[tuple[str, dict[str, Any], str]]:
-    ev = evaluate(sharpe=a.sharpe, fitness=a.fitness, turnover=a.turnover, checks=a.checks, delay=a.delay,
-                  region=a.region)
-    s = normalize_settings(a.settings or {})
-    region = s["region"]
-    expr = a.code or ""
-    out: list[tuple[str, dict[str, Any], str]] = []
+    """Targeted variants (expression, settings, kind) for a near miss, in the fix library's default order.
 
-    def add(e: Any, settings: dict[str, Any], kind: str) -> None:
-        out.append((_src(e), normalize_settings(settings), kind))
-
-    if ev.flip_sign:
-        expr = _src(negate(expr))
-        add(expr, s, "sign flip")
-    failing = set(ev.failing)
-    turnover = a.turnover or 0.0
-    decay = int(s.get("decay") or 0)
-
-    if "HIGH_TURNOVER" in failing or turnover > 0.3:
-        nd = retune_decay(decay, turnover)
-        if nd != decay:
-            add(expr, {**s, "decay": nd}, f"decay {decay}→{nd}")
-        add(wrap(expr, "ts_decay_linear", 5), s, "ts_decay_linear 5")
-        add(wrap(expr, "hump", hump=0.01), s, "hump 0.01")
-    if "LOW_TURNOVER" in failing and decay > 0:
-        add(expr, {**s, "decay": max(0, decay // 2)}, f"decay {decay}→{decay // 2}")
-    if "CONCENTRATED_WEIGHT" in failing:
-        add(expr, {**s, "truncation": 0.05}, "truncation 0.05")
-        add(wrap(expr, "rank"), s, "rank wrap")
-    if "LOW_SUB_UNIVERSE_SHARPE" in failing:
-        add(wrap(expr, "group_neutralize", 'bucket(rank(cap), range="0.1,1,0.1")'), s, "size-bucket neutral")
-    if failing & {"LOW_SHARPE", "LOW_FITNESS", "IS_LADDER_SHARPE", "LOW_2Y_SHARPE"} or ev.verdict == "promising":
-        allowed = brain.options.neutralizations(region)
-        current = s.get("neutralization")
-        sweep = [n for n in ["SUBINDUSTRY", "INDUSTRY", "SECTOR", "MARKET"] + RISK_NEUTRALIZATIONS
-                 if n in allowed and n != current][:3]
-        for n in sweep:
-            add(expr, {**s, "neutralization": n}, f"neutralization {current}→{n}")
-        add(scale_windows(expr, 0.5), s, "windows ×0.5")
-        add(scale_windows(expr, 2.0), s, "windows ×2")
-        add(wrap(expr, "group_rank", "subindustry"), s, "group_rank subindustry")
-    if failing & {"SELF_CORRELATION", "PROD_CORRELATION"}:
-        add(wrap(expr, "group_neutralize", "sector"), s, "sector neutral (decorrelate)")
-    # de-duplicate
-    seen, uniq = set(), []
-    for e, st, kind in out:
-        key = (e, tuple(sorted(st.items())))
-        if key not in seen and e:
-            seen.add(key)
-            uniq.append((e, st, kind))
-    return uniq[:max_variants]
+    Kept for callers that want a plan without the database or the AI; the research engine uses the learned order in
+    engine/refine.py."""
+    from .refine import plan_static
+    return [(v.expr, v.settings, v.detail) for v in plan_static(a, max_variants)]
 
 
-async def llm_refine(a: Alpha, k: int = 4) -> list[CandidateSpec]:
-    failing =[f"- {c.get('name')}: {c.get('result')} (value {c.get('value')}, limit {c.get('limit')})"
+async def llm_refine(a: Alpha, k: int = 4, *, tried: list[str] | None = None,
+                     collide: str | None = None) -> list[CandidateSpec]:
+    """k AI variants of `a` aimed at its failing checks. `tried` lists fixes already tried (and their results) so the
+    model does not repeat them; `collide` is the submitted alpha it is too correlated with."""
+    failing = [f"- {c.get('name')}: {c.get('result')} (value {c.get('value')}, limit {c.get('limit')})"
                for c in (a.checks or []) if str(c.get("result", "")).upper() in ("FAIL", "WARNING", "ERROR")]
     yearly = await db.kv_get(f"yearly:{a.id}") or []
     yearly_txt = "\n".join(str(r) for r in yearly[-6:])
@@ -114,9 +65,10 @@ async def llm_refine(a: Alpha, k: int = 4) -> list[CandidateSpec]:
     prompt = await render("refine", k=k, expression=a.code, settings=pack.settings_text(s), sharpe=a.sharpe,
                           fitness=a.fitness, turnover=a.turnover, returns=a.returns, drawdown=a.drawdown,
                           margin=a.margin, failing="\n".join(failing) or "- none (improve robustness)",
-                          yearly=yearly_txt, dataset_context=ds_ctx)
-    batch = await llm.generate_json(prompt, IdeaBatch, system=await pack.static_prefix(), role="refine",
-                                       purpose="refine")
+                          tried="\n".join(tried or []), collide=collide or "", yearly=yearly_txt,
+                          dataset_context=ds_ctx)
+    batch = await llm.generate_json(prompt, IdeaBatch, system=await pack.static_prefix(s["region"], s["delay"]),
+                                    role="refine", purpose="refine")
     catalog = await get_catalog(s["region"], s["delay"], s["universe"])
     specs = []
     for idea in batch.ideas[:k * 2]:
@@ -129,32 +81,18 @@ async def llm_refine(a: Alpha, k: int = 4) -> list[CandidateSpec]:
 
 async def optimize_alpha(alpha_id: str, *, rounds_hint: int = 1, batch_id: int | None = None, use_llm: bool = True,
                          max_variants: int = 8, task_id: int | None = None) -> list[int]:
-    """Queue optimisation variants of an alpha; returns the candidate ids (created + reused)."""
+    """Queue one round of targeted repairs of an alpha (no waiting); returns the candidate ids (created + reused).
+    The automatic research uses the multi-round loop in engine/refine.py instead."""
+    from .refine import RefineContext, expand_once
     async with db.session() as s:
         a = await s.get(Alpha, alpha_id)
     if a is None or not a.code:
         raise ValueError("Alpha not found or has no expression")
-    specs = [CandidateSpec(expression=e, settings=st, origin="optimize", parent_alpha_id=a.id,
-                           dataset_id=(a.dataset_ids or [None])[0], hypothesis=f"Optimisation of {a.id}: {kind}",
-                           rationale={"kind": kind})
-             for e, st, kind in plan_variants(a, max_variants)]
-    if use_llm and llm.configure():
-        try:
-            specs += await llm_refine(a, k=3)
-        except Exception as exc:
-            log.warning("LLM refine failed for %s: %s", alpha_id, exc)
-    for spec in specs:
-        spec.task_id = task_id
-    result = await simulator.submit(specs, batch_id=batch_id)
-    async with db.write() as s:
-        for c in result.created + result.reused:
-            rationale = c.rationale or {}
-            kind = rationale.get("kind") or ("llm refine" if rationale.get("refine") else "variant")
-            s.add(OptimizationAttempt(parent_alpha_id=a.id, candidate_id=c.id, kind=str(kind)[:48],
-                                      detail=c.expression[:500]))
-    bus.publish("optimize", f"Optimising {alpha_id}: {len(result.created)} variants queued "
-                            f"({len(result.reused)} reused).")
-    return [c.id for c in result.created + result.reused]
+    ctx = RefineContext(task_id=task_id, batch_id=batch_id, use_llm=use_llm and llm.configure(),
+                        root_fanout=max_variants + (3 if use_llm else 0))
+    ids = await expand_once(a, ctx)
+    bus.publish("optimize", f"Optimising {alpha_id}: {len(ids)} targeted variants queued.")
+    return ids
 
 
 async def count_attempts() -> int:

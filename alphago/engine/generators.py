@@ -59,14 +59,23 @@ def settings_from_idea(idea: AlphaIdea, base: dict[str, Any], category: str | No
 
 async def llm_ideas(scope: dict[str, Any], *, dataset_id: str | None, n: int, goal: str, move: str = "EXPLORE",
                     themes: list[str] | None = None, base_settings: dict[str, Any] | None = None,
-                    origin: str = "llm") -> list[CandidateSpec]:
+                    origin: str = "llm", report: dict[str, Any] | None = None) -> list[CandidateSpec]:
+    """AI ideas for a scope/dataset: generate in small calls, validate (one AI repair round), then let the AI critique
+    its own batch and drop the worst (settings.llm.self_check). `report` collects what was dropped and why."""
     region, delay, universe = scope["region"], int(scope["delay"]), scope["universe"]
     base = normalize_settings({**(base_settings or {}), "region": region, "delay": delay, "universe": universe})
-    system = await pack.static_prefix()
+    system = await pack.static_prefix(region, delay)
     ds_ctx = await pack.dataset_context(dataset_id, region, delay, universe) if dataset_id else \
         "No specific dataset: use price/volume (pv1) fields and any fields you are confident exist."
     examples = await pack.best_examples(region)
     avoid = await pack.avoid_list(region, dataset_id)
+    reviewed = await pack.review_examples(region)
+    from ..llm.base import PROMPT_VERSION
+    from ..llm.prompts import current_version
+    from .tournament import choose
+    version = await current_version("ideation")
+    version_token = PROMPT_VERSION.set(version)
+    idea_model: dict[str, str] = {}
     # Several small calls with fresh themes beat one big call: less repetition, no truncated JSON.
     per_call = max(1, settings.llm.ideas_per_call)
     ideas: list[AlphaIdea] = []
@@ -77,19 +86,29 @@ async def llm_ideas(scope: dict[str, Any], *, dataset_id: str | None, n: int, go
         call_themes = themes if themes and not ideas else random.sample(THEMES, 4)
         prompt = await render("ideation", n=k, goal=goal, move=move, move_hint=MOVES.get(move, ""),
                               themes=", ".join(call_themes), settings=pack.settings_text(base),
-                              dataset_context=ds_ctx, examples="\n".join(examples), avoid="\n".join(avoid))
+                              dataset_context=ds_ctx, examples="\n".join(examples), avoid="\n".join(avoid),
+                              review_examples=reviewed)
+        contestant = await choose()
         try:
-            batch = await llm.generate_json(prompt, IdeaBatch, system=system, role="ideation", purpose="ideation")
+            if contestant:
+                batch = await llm.generate_json_with(contestant[0], contestant[1], prompt, IdeaBatch, system=system,
+                                                     role="ideation", purpose="ideation")
+            else:
+                batch = await llm.generate_json(prompt, IdeaBatch, system=system, role="ideation", purpose="ideation")
         except LLMError:
             if not ideas:
+                PROMPT_VERSION.reset(version_token)
                 raise
             break  # keep what earlier chunks produced (budget hit / persistent throttling)
+        label = f"{contestant[0]}:{contestant[1]}" if contestant else f"{llm.name}:{llm.pick('ideation')}"
         for idea in batch.ideas[: k * 2]:
             key = "".join(idea.expression.split())
             if key not in seen:
                 seen.add(key)
                 ideas.append(idea)
+                idea_model[idea.expression] = label
         remaining -= k
+    PROMPT_VERSION.reset(version_token)
     category = await dataset_category(dataset_id, scope)
     catalog = await get_catalog(region, delay, universe)
 
@@ -108,14 +127,42 @@ async def llm_ideas(scope: dict[str, Any], *, dataset_id: str | None, n: int, go
                     good.append(idea)
         except Exception as exc:
             log.warning("repair round failed: %s", exc)
+    good = good[:n]
+    if settings.llm.self_check and len(good) >= 3:
+        good = await self_check(good, ds_ctx, system, report)
     specs = []
     for idea in good[:n]:
         specs.append(CandidateSpec(
             expression=idea.expression, settings=settings_from_idea(idea, base, category), origin=origin,
             hypothesis=idea.idea, dataset_id=dataset_id,
             rationale={"mechanism": idea.mechanism, "data": idea.data_rationale, "operators": idea.operator_rationale,
-                       "move": move}))
+                       "move": move, "prompt_version": version,
+                       "llm_model": idea_model.get(idea.expression) or f"{llm.name}:{llm.pick('ideation')}"}))
     return specs
+
+
+async def self_check(ideas: list[AlphaIdea], dataset_context: str, system: str | None,
+                     report: dict[str, Any] | None = None, max_drop_share: float = 0.25) -> list[AlphaIdea]:
+    """One AI call critiques the batch (overfitting, duplicate ideas, wrong field types, look-ahead); ideas it marks
+    keep=false are dropped, worst first, at most `max_drop_share` of the batch. Costs no BRAIN quota; if the call
+    fails, every idea is kept."""
+    from ..llm.schemas import BatchCritique
+    listing = "\n".join(f"[{i}] {x.expression}\n    idea: {x.idea}" for i, x in enumerate(ideas))
+    try:
+        critique = await llm.generate_json(await render("self_check", ideas=listing, dataset_context=dataset_context),
+                                           BatchCritique, system=system, role="ideation", purpose="self_check",
+                                           thinking="low")
+    except Exception as exc:
+        log.warning("AI self-check failed (all ideas kept): %s", exc)
+        return ideas
+    bad = sorted((r for r in critique.reviews if not r.keep and 0 <= r.index < len(ideas)),
+                 key=lambda r: len(r.issues), reverse=True)
+    cap = max(1, int(len(ideas) * max_drop_share))
+    drop = {r.index: r for r in bad[:cap]}
+    if report is not None and drop:
+        report.setdefault("self_check", []).extend(
+            {"expression": ideas[i].expression, "issues": r.issues, "reason": r.reason} for i, r in drop.items())
+    return [x for i, x in enumerate(ideas) if i not in drop]
 
 
 async def dataset_fields(scope: dict[str, Any], dataset_id: str, min_coverage: float = 0.3,

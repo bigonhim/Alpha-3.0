@@ -21,7 +21,7 @@ from pydantic import BaseModel, ValidationError
 from ..config import settings
 from ..credentials import gemini_key
 from ..db import db
-from .base import LLMError, Pacer, log_call
+from .base import LLMError, Pacer, chosen_model, log_call
 from .base import calls_today as _cloud_calls_today
 
 log = logging.getLogger(__name__)
@@ -162,7 +162,7 @@ class GeminiClient:
             raise LLMError(f"Daily Gemini call budget ({settings.llm.daily_call_budget}) reached — raise it on the "
                            "LLM Integration page or wait for the reset at midnight Pacific.")
         client = self.client          # raises LLMError right away when no key is configured (never retried)
-        model = self.pick(role)
+        model = chosen_model(self, role)
         level = (thinking or settings.llm.thinking_level or "").upper()
         use_thinking = level in ("MINIMAL", "LOW", "MEDIUM", "HIGH")
         attempt = 0

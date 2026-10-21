@@ -49,7 +49,7 @@ async def page() -> None:
                 score_v, score_s = mini_tile("trending_up", "Average Alpha Score", "ag-cyan")
             ready_s.set_text("Review and submit from Alphas")
             rate_s.set_text("Promising or better")
-            score_s.set_text("Your alphas, last 7 days (0–100)")
+            score_s.set_text("Your alphas, last 7 days (80 = at BRAIN's limits)")
             pipeline = ui.row().classes("gap-2 flex-wrap mt-3 items-center")
 
         with ui.card().classes("ag-card p-0 w-[520px] min-w-[420px]"):
@@ -112,6 +112,11 @@ async def page() -> None:
         hello.set_text(f"Welcome back.\n{fmt_int(n['sims_left'])} simulations left today."
                        + (f" {fmt_int(queued)} more are already queued." if queued else ""))
         sub_v.set_text(fmt_int(n["submittable"]))
+        untested = n["submittable"] - n["ready_robust"] - n["ready_fragile"]
+        detail = f"{n['ready_robust']} robust · {n['ready_fragile']} fragile · {untested} untested"
+        sub_s.set_text("Passed BRAIN's check: " + detail + (f" · {n['recheck']} need a re-check" if n["recheck"]
+                                                             else ""))
+        ready_s.set_text(detail)
         left_v.set_text(f"{fmt_int(n['sims_left'])} / {fmt_int(n['sims_limit'])}")
         left_s.set_text(f"Resets in {int(brain.client.quota.seconds_to_reset // 3600)}h "
                         f"{int(brain.client.quota.seconds_to_reset % 3600 // 60)}m")

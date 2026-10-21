@@ -1,6 +1,6 @@
 # AlphaGo User Guide
 
-_Last updated 15 October 2026. Screenshots use example data. An online copy you can comment on: [AlphaGo User Guide](https://claude.ai/code/artifact/f3e8b974-8270-4943-9708-a60def579acd)._
+_Last updated 21 October 2026. Screenshots use example data. An online copy you can comment on: [AlphaGo User Guide](https://claude.ai/code/artifact/f3e8b974-8270-4943-9708-a60def579acd)._
 
 ## 1. What AlphaGo is
 
@@ -11,6 +11,28 @@ It is a local, single-user app:
 - Your BRAIN password and AI provider keys (Gemini, Anthropic, OpenAI) live only in Windows Credential Manager (service `AlphaGo`).
 - Every alpha, simulation and task is kept in a local SQLite database (alphago.db), and your settings in settings.json, both in `%APPDATA%\AlphaGo`.
 - Only BRAIN and the AI provider you chose are contacted, plus Yahoo Finance when you test an SPC prompt (tickers and dates only). With a local Ollama model, AI prompts never leave your PC.
+
+### What's new on 21 October 2026
+
+- **Getting to submittable.** Four things kept alphas from reaching *ready*, and all four are fixed:
+  - an informational POWER_POOL_CORRELATION fail used to mark BRAIN's check failed;
+  - only the top 3 strong alphas of a task were ever checked;
+  - the optimiser ran one shallow round;
+  - correlation failures were never repaired.
+- **Repair loop.** It now stacks targeted fixes over several rounds and learns which fixes work, check by check. It runs during the task, not only at the end. Then every strong alpha gets BRAIN's check, most different first.
+- **Badges, not demotions.** An alpha that passes BRAIN's check stays *ready*. AlphaGo's robustness, walk-forward and search-adjusted figures are badges on it. A *fragile* alpha is one BRAIN would accept that AlphaGo thinks may not hold up.
+- **Before simulating:**
+  - near-certain copies of your submitted alphas are left out;
+  - each economic idea gets a daily share;
+  - the AI critiques its own batch;
+  - the AI learns from the ideas you approved, rejected and rewrote.
+- **New pages:**
+  - **Health**: AI provider and BRAIN errors over time, and which repairs work;
+  - **Audit Log**: every action on your account;
+  - **Quota Planner**: results per 100 simulations, and a suggested split.
+- **LLM Integration:** fallback providers, a model tournament, and prompt versions with their results.
+- **Sync with BRAIN:** email alerts, and **Start with Windows** (runs in the background with `--headless`).
+- The web UI now listens on 127.0.0.1 only.
 
 ### What's new on 15 October 2026
 
@@ -343,7 +365,10 @@ Follows the Super Alpha guide in three numbered steps (step 1 in the left card, 
 | **Research History** | The last 50 Autopilot runs (batch counts, strong and ready totals), and the **Idea journal**: every simulated idea with hypothesis, verdict, metrics and failing checks. Search and filter by verdict; double-click to open the alpha. Rejected and weak shapes are fed back to the AI as "avoid" examples (up to 25 per region and dataset) |
 | **Analytics** | Simulations per day (30 days), AI success rate, Sharpe distribution, most frequent failing checks, yield by generator and by dataset (top 20), LLM calls per day |
 | **LLM Integration** | **Active provider** (Gemini, Claude, OpenAI / compatible, Ollama (local)), the provider's key or server URL (**Save & test**, **Test connection**, **Forget key**), for Ollama the **Context window**, model per role (Ideation, Refinement, Descriptions; **Auto** by default), thinking level, ideas per call, daily call budget (cloud providers), starting requests per minute, language of AI explanations, usage chart, and the Jinja2 **Prompt templates** editor with **Reset to default** and **View knowledge pack** |
-| **Sync with BRAIN** | **BRAIN account** sign-in (with the biometric verification box), **Simulation settings available to you** (live from BRAIN; **Refresh from BRAIN**), **Data catalogue** syncs per scope, **Your alphas & programs** syncs, and the last 8 sync tasks |
+| **Sync with BRAIN** | **BRAIN account** sign-in (with the biometric verification box), **Simulation settings available to you** (live from BRAIN; **Refresh from BRAIN**), **Data catalogue** syncs per scope, **Your alphas & programs** syncs, the last 8 sync tasks, **Email alerts** (SMTP server, user, app password, recipient, which events; **Send test**) and **Run in the background** (**Start with Windows**, keep the PC awake while simulations run) |
+| **Quota Planner** | Per dataset and strategy: simulations so far and promising / strong / passed-check per 100 with an 80% range. **Simulations to allocate** gives a suggested split; **Create planned tasks** turns its research rows into tasks that wait for your approval |
+| **Health** | AI provider errors per day by kind (rate-limited, timed out, model unavailable, server error), per-provider and per-model tables, BRAIN per day (simulated, simulation errors, 429s, concurrency rejections, 5xx, network errors, quota), **Which repairs work** and **Self-correlation estimate vs BRAIN** |
+| **Audit Log** | Every action on your BRAIN account with time, who (you, you (confirmed), task:N, batch:N, autopilot, system), action, HTTP status, simulations spent, alphas and details. Filter by action, who and period; **Export CSV** |
 
 ![Research History: Autopilot runs and the idea journal](docs/user-guide/22-research-history.png)
 
@@ -640,7 +665,9 @@ BRAIN's *Consultant Do's and Don'ts* lists "using automation to generate Alpha i
 | LLM Integration | Starting requests per minute (then adapts on its own) | 6 |
 | LLM Integration | Thinking level | low |
 | LLM Integration | Language of AI explanations | English |
-| Alpha Autopilot | Mode · research focus · tasks per day · simulations per task · cores per task · daily cap · robustness gate | Assisted · automatic · 2 · 500 · 4 · 500 · on |
+| Alpha Autopilot | Mode · research focus · tasks per day · simulations per task · cores per task · daily cap · robustness test | Assisted · automatic · 2 · 500 · 4 · 500 · on |
+| LLM Integration | Fallback providers · AI self-check · model tournament | none · on · off |
+| Sync with BRAIN | Email alerts · Start with Windows · keep the PC awake while simulations run | off · off · on |
 | Osmosis | Lock day and time · points per alpha · alphas per scope · leave-out rule · weighting | Sun 23:59 New York · 1,000–15,000 · at least 10 · 2-year Sharpe < 0.5 or turnover > 50% · Equal risk |
 | Power Pool | Max per scope · rating floor | 15 · Good+ |
 | SPC Lab | Form rules | `company_name` and `ticker` required |
@@ -660,6 +687,13 @@ Advanced settings live in `%APPDATA%\AlphaGo\settings.json`, created the first t
 | `programs.daily_regular_submissions` | Regular submissions per day (counted from AlphaGo only) | 4 |
 | `programs.daily_super_submissions` | Super Alpha submissions per day | 1 |
 | `programs.pp_max_corr` | Power Pool: picked alphas must correlate below this | 0.5 |
+| `research.optimize_share` | Share of a task's simulations reserved for repairing near misses (and robustness tests) | 0.2 |
+| `research.repair_depth` | Rounds of stacked fixes per near miss | 3 |
+| `research.check_cap` | BRAIN checks per task or AI batch (a check costs no simulations) | 15 |
+| `research.duplicate_filter` | Leave out generated copies of a submitted alpha (same shape and fields) | true |
+| `research.cluster_share` · `research.cluster_min` | Max share of the day's simulations per economic idea (0 = off) · never below this many | 0.4 · 150 |
+| `llm.tournament.min_ideas` | Simulated ideas per model before the tournament follows the results | 60 |
+| `alerts.quiet_minutes` · `alerts.stuck_minutes` · `alerts.summary_hour` | Same alert at most every N minutes · queue counts as stuck after N minutes · hour of the daily summary | 30 · 30 · 18 |
 
 ### When something goes wrong
 

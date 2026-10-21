@@ -55,6 +55,9 @@ class BrainClient:
         self._persona_inquiry: tuple[str, str] | None = None   # (post_url, inquiry_id) for the legacy flow
         self.last_error: str | None = None
         self.on_state_change: Callable[[str], None] | None = None
+        # observers see every response: (method, path, status, json body sent, final?, response or None) —
+        # the Health page's counters and the audit log
+        self.observers: list[Callable[..., None]] = []
 
     # ------------------------------------------------------------ lifecycle
 
@@ -245,11 +248,15 @@ class BrainClient:
                 response = await self.http.request(method, url, params=params, json=json)
             except (httpx.TransportError, httpx.TimeoutException) as exc:
                 attempt += 1
+                self._observe(method, url, 0, json, attempt > retries, None)
                 if attempt > retries:
                     raise BrainError(f"Network error talking to BRAIN: {exc}") from exc
                 await asyncio.sleep(min(30.0, 2 ** attempt + random.random()))
                 continue
             self.quota.update_from_headers(response.headers)
+            final = not ((response.status_code == 401 and authenticated and not relogged)
+                         or (response.status_code in retry_statuses and attempt < retries))
+            self._observe(method, url, response.status_code, json, final, response)
             if response.status_code == 401 and authenticated and not relogged:
                 relogged = True
                 await self.login()
@@ -262,6 +269,14 @@ class BrainClient:
                 await asyncio.sleep(min(120.0, max(1.0, wait)))
                 continue
             return response
+
+    def _observe(self, method: str, url: str, status: int, body: Any, final: bool,
+                 response: httpx.Response | None) -> None:
+        for fn in list(self.observers):
+            try:
+                fn(method, str(url), status, body, final, response)
+            except Exception:
+                log.exception("BRAIN request observer failed")
 
     async def get_json(self, url: str, params: Any = None) -> Any:
         response = await self.request("GET", url, params=params)

@@ -19,18 +19,15 @@ from typing import Any
 from sqlalchemy import select, update
 
 from ..brain import brain
-from ..brain.simulations import normalize_settings
 from ..config import settings as app_settings
 from ..db import db
 from ..db.models import Alpha, AutopilotRun, Batch, Candidate
 from ..events import bus
-from ..fastexpr import scale_windows
 from ..llm import LLMError, llm
-from . import actions
 from .datasets import choose_dataset
 from .evaluator import promising_or_better
 from .generators import MOVES, llm_ideas, mutation_ideas, template_ideas
-from .optimizer import optimize_alpha
+from .refine import RefineContext, certify, check_robustness, refine  # noqa: F401  (check_robustness re-exported)
 from .simulator import CandidateSpec, simulator
 
 log = logging.getLogger(__name__)
@@ -65,7 +62,7 @@ class AutopilotConfig:
     family_cap: int = 3
     robustness_gate: bool = True
     max_batches: int = 0          # 0 = unlimited
-    check_top_k: int = 3          # run /check on up to k strong alphas per batch
+    check_top_k: int = 15         # run /check on up to k strong alphas per batch (no simulation quota)
     neutralization: str | None = None
 
     @classmethod
@@ -75,7 +72,8 @@ class AutopilotConfig:
                    max_rounds=r.max_rounds, quota_share=r.quota_share,
                    stop_after_empty_batches=r.stop_after_empty_batches, generator_mix=dict(r.generator_mix),
                    dataset_strategy=r.dataset_strategy, pinned_datasets=list(r.pinned_datasets),
-                   family_cap=r.family_cap_per_batch, robustness_gate=r.robustness_gate)
+                   family_cap=r.family_cap_per_batch, robustness_gate=r.robustness_gate,
+                   check_top_k=r.check_cap)
 
 
 class Autopilot:
@@ -89,6 +87,8 @@ class Autopilot:
         self._stop = asyncio.Event()
         self.rng = random.Random()
         self.status_line = "Stopped"
+        self._budget = 0
+        self._report: dict[str, Any] = {}
 
     @property
     def running(self) -> bool:
@@ -176,8 +176,11 @@ class Autopilot:
     async def _run(self) -> None:
         cfg = self.config
         assert cfg is not None
+        from .audit import ACTOR
+        ACTOR.set("autopilot" if cfg.mode == "autopilot" else "assisted")
         start_remaining = brain.client.quota.effective_remaining
         budget = int(start_remaining * cfg.quota_share)
+        self._budget = budget
         empty = 0
         n_batches = 0
         reason = "finished"
@@ -242,7 +245,7 @@ class Autopilot:
                 try:
                     self.status_line = f"Asking {llm.label} for {n_llm} ideas ({move})…"
                     specs += await llm_ideas(scope, dataset_id=dataset_id, n=n_llm, goal=GOALS.get(cfg.goal, cfg.goal),
-                                             move=move, base_settings=base)
+                                             move=move, base_settings=base, report=self._report)
                 except LLMError as exc:
                     bus.publish("generate", f"{llm.label} unavailable ({exc.message}); using templates instead.",
                                 "warning")
@@ -291,9 +294,17 @@ class Autopilot:
             bid = batch.id
         self.batch_id = bid
         self.status_line = f"Batch #{bid}: generating ideas for {dataset_id or 'price/volume'}"
+        self._report = {}
         specs = await self._generate(scope, dataset_id, cfg.batch_size, move)
+        dropped = self._report.get("self_check") or []
+        if dropped:
+            async with db.write() as s:
+                await s.execute(update(Batch).where(Batch.id == bid).values(notes={"self_check": dropped}))
+            bus.publish("generate", f"AI self-check dropped {len(dropped)} idea(s) of batch #{bid} before simulating: "
+                                    + "; ".join(d["reason"] or ", ".join(d["issues"]) for d in dropped[:3]))
         initial = "new" if cfg.mode == "assisted" else "approved"
-        result = await simulator.prepare(specs, batch_id=bid, family_cap=cfg.family_cap, initial_status=initial)
+        result = await simulator.prepare(specs, batch_id=bid, family_cap=cfg.family_cap, initial_status=initial,
+                                         cluster_cap=True)
         bus.publish("generate", f"{len(result.created)} new alpha candidates generated for batch #{bid} "
                                 f"({dataset_id or 'pv'}, {move.lower()}); {len(result.invalid)} invalid, "
                                 f"{len(result.reused)} cached.")
@@ -321,32 +332,24 @@ class Autopilot:
         self.status_line = f"Batch #{bid}: simulating {queued} alphas (round 1)"
         await simulator.wait_for(ids)
 
-        # optimisation rounds on near misses
-        for rnd in range(2, cfg.max_rounds + 1):
-            if self._stop.is_set():
-                return False
-            near = await self._batch_alphas(bid, verdicts=("promising",), limit=3)
-            if not near:
-                break
-            new_ids: list[int] = []
-            for a in near:
-                new_ids += await optimize_alpha(a.id, batch_id=bid, use_llm=cfg.generator_mix.get("llm", 0) > 0)
-            self.status_line = f"Batch #{bid}: optimisation round {rnd} ({len(new_ids)} variants)"
-            bus.publish("optimize", f"Batch #{bid} round {rnd}: {len(new_ids)} optimisation variants of "
-                                    f"{len(near)} near-misses.")
-            await simulator.wait_for(new_ids)
+        # repair rounds on near misses: targeted, stacked fixes; a parent is never expanded twice
+        ctx = RefineContext(batch_id=bid, use_llm=cfg.generator_mix.get("llm", 0) > 0, stop=self._stop,
+                            allowance=self._allowance, max_depth=max(0, cfg.max_rounds - 1),
+                            robustness=cfg.robustness_gate)
+        if ctx.max_depth and not self._stop.is_set():
+            near = [a for a in await self._batch_alphas(bid, verdicts=("promising",), limit=6)
+                    if a.expanded_at is None and a.check_state != "fail"][:3]
+            if near:
+                self.status_line = f"Batch #{bid}: repairing {len(near)} near miss(es)"
+                await refine(near, ctx)
+        if self._stop.is_set():
+            return False
 
-        # submission checks on the best strong alphas (+ robustness gate)
-        strong = await self._batch_alphas(bid, verdicts=("strong",), limit=cfg.check_top_k)
-        for a in strong:
-            if self._stop.is_set():
-                break
-            try:
-                state, _ = await actions.run_check(a.id)
-                if state == "pass" and cfg.robustness_gate:
-                    await self._robustness(a.id, bid)
-            except Exception as exc:
-                bus.publish("check", f"Check failed for {a.id}: {getattr(exc, 'message', exc)}", "warning")
+        # BRAIN submission checks on every strong alpha (most different first), robustness for those that pass
+        strong = await self._batch_alphas(bid, verdicts=("strong",), limit=200)
+        if strong:
+            self.status_line = f"Batch #{bid}: BRAIN checks on {len(strong)} strong alpha(s)"
+            await certify([a.id for a in strong], ctx, cap=cfg.check_top_k)
         counts = await self._batch_counts(bid)
         async with db.write() as s:
             await s.execute(update(Batch).where(Batch.id == bid).values(
@@ -379,44 +382,13 @@ class Autopilot:
             "rejected": verdicts.count("rejected") + sum(c.status in ("error", "invalid") for c in cands),
         }
 
-    async def _robustness(self, alpha_id: str, bid: int) -> None:
-        await check_robustness(alpha_id, bid)
-
-
-async def check_robustness(alpha_id: str, bid: int | None, task_id: int | None = None) -> None:
-    """Chan-style sensitivity check: neighbouring settings/windows should keep ≥ 80% of the Sharpe."""
-    async with db.session() as s:
-        a = await s.get(Alpha, alpha_id)
-    if a is None or not a.code or a.sharpe is None:
-        return
-    st = normalize_settings(a.settings or {})
-    specs = [
-        CandidateSpec(expression=a.code, settings={**st, "decay": int(st["decay"]) + 2}, origin="robustness",
-                      parent_alpha_id=a.id, hypothesis="robustness: decay +2", task_id=task_id),
-        CandidateSpec(expression=scale_windows(a.code, 0.8).to_source(), settings=st, origin="robustness",
-                      parent_alpha_id=a.id, hypothesis="robustness: windows ×0.8", task_id=task_id),
-        CandidateSpec(expression=scale_windows(a.code, 1.25).to_source(), settings=st, origin="robustness",
-                      parent_alpha_id=a.id, hypothesis="robustness: windows ×1.25", task_id=task_id),
-    ]
-    result = await simulator.submit(specs, batch_id=bid)
-    ids = [c.id for c in result.created + result.reused]
-    await simulator.wait_for(ids)
-    async with db.session() as s:
-        alpha_ids = list(await s.scalars(select(Candidate.alpha_id).where(Candidate.id.in_(ids))))
-        sharpes = [x for x in await s.scalars(select(Alpha.sharpe).where(Alpha.id.in_(alpha_ids))) if x is not None]
-    ratio = (min(sharpes) / a.sharpe) if sharpes and a.sharpe else 0.0
-    robust = ratio >= 0.8
-    await db.kv_set(f"robust:{alpha_id}", {"ratio": round(ratio, 3), "robust": robust, "n": len(sharpes)})
-    if robust:
-        bus.publish("check", f"{alpha_id} is ready and robust (neighbours keep {ratio:.0%} of Sharpe) — review it "
-                             "on the Alphas page.", "success")
-    else:
-        async with db.write() as s:
-            row = await s.get(Alpha, alpha_id)
-            if row and row.verdict == "ready":
-                row.verdict = "strong"
-        bus.publish("check", f"{alpha_id} passed checks but is fragile (neighbours keep only {ratio:.0%} of "
-                             "Sharpe) — kept as 'strong'.", "warning")
+    async def _allowance(self) -> int:
+        """Simulations this run may still spend: its share of the day's quota and, in Full Autopilot, the daily cap."""
+        left = self._budget - await self._run_spent()
+        if self.config is not None and self.config.mode == "autopilot":
+            from .research import autopilot_sims_today
+            left = min(left, app_settings.research.autopilot_daily_cap - await autopilot_sims_today())
+        return left
 
 
 autopilot = Autopilot()

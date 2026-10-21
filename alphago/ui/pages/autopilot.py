@@ -125,8 +125,9 @@ async def page() -> None:
             sims = ui.number("Simulations per task", value=r.task_sims, min=10, step=50).classes("w-44")
             cores = ui.number("Cores per task", value=r.task_cores, min=1, max=8).classes("w-32")
             cap = ui.number("Daily Autopilot cap", value=r.autopilot_daily_cap, min=0, step=50).classes("w-40")
-            robust = ui.checkbox("Robustness gate", value=r.robustness_gate).tooltip(
-                "Neighbouring settings must keep ≥ 80% of the Sharpe before an alpha counts as ready.")
+            robust = ui.checkbox("Robustness test", value=r.robustness_gate).tooltip(
+                "After an alpha passes BRAIN's check, simulate 3 neighbouring settings (3 simulations) and label it "
+                "robust (≥ 80% of the Sharpe kept) or fragile. It stays ready either way — the badge informs you.")
         with ui.row().classes("gap-2 mt-2"):
             plan_btn = ui.button("Plan next task", icon="auto_awesome", on_click=lambda: plan_next())
             ui.label("Manual tasks: Tasks → New task…, or Dataset Intelligence → Research task….").classes(

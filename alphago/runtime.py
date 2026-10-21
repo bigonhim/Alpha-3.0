@@ -21,6 +21,8 @@ started = asyncio.Event()
 async def _keepalive() -> None:
     """Keep the BRAIN session alive: refresh expiry every 5 min, re-login before it lapses."""
     from .config import settings
+    from .engine.audit import ACTOR
+    ACTOR.set("system")
     while True:
         try:
             client = brain.client
@@ -40,6 +42,8 @@ async def _keepalive() -> None:
 
 
 async def try_auto_login() -> None:
+    from .engine.audit import ACTOR
+    ACTOR.set("system")
     if not brain_credentials():
         return
     try:
@@ -124,6 +128,11 @@ async def startup() -> None:
     bus.preload([Event(source=r.source, message=r.message, level=r.level, payload=r.payload or {}, ts=r.ts)
                  for r in rows])
     await brain.client.start()
+    from .brain import recorder
+    from .engine import alerts, audit, health
+    audit.install()                         # every action on your BRAIN account, append-only
+    health.install()                        # BRAIN throttles / errors per day for the Health page
+    recorder.install()                      # only with ALPHAGO_RECORD_BRAIN set
     await _restore_options()
     from .llm import llm
     llm.configure()
@@ -134,19 +143,35 @@ async def startup() -> None:
     from .engine.research import daily_scheduler, research
     await research.restore()                # tasks interrupted by a restart wait for the user
     await _close_stale_runs()
+    from .engine.actions import rederive_check_states
+    await rederive_check_states()
     await jobs.start()
     _tasks.append(asyncio.create_task(try_auto_login(), name="auto-login"))
     _tasks.append(asyncio.create_task(_keepalive(), name="keepalive"))
     _tasks.append(asyncio.create_task(daily_scheduler(), name="daily-scheduler"))
+    from .background import keep_awake_loop
+    alerts.install()
+    _tasks.append(asyncio.create_task(health.flush_loop(), name="health-flush"))
+    _tasks.append(asyncio.create_task(alerts.watchdog(), name="alerts-watchdog"))
+    _tasks.append(asyncio.create_task(keep_awake_loop(), name="keep-awake"))
     started.set()
     log.info("AlphaGo started")
 
 
 async def shutdown() -> None:
+    from .background import release_instance_lock, set_awake
+    from .engine import audit, health
     from .engine.simulator import simulator
     from .jobs.queue import jobs
     for task in _tasks:
         task.cancel()
+    try:
+        await health.flush()
+        await audit.flush()
+    except Exception:
+        log.exception("final flush failed")
+    set_awake(False)
+    release_instance_lock()
     await jobs.stop()
     await simulator.stop()
     await brain.client.close()

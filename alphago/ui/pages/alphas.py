@@ -12,7 +12,7 @@ from sqlalchemy import or_, select
 from ...db import db
 from ...db.models import Alpha
 from ...jobs.queue import jobs
-from ..alpha_detail import open_alpha
+from ..alpha_detail import open_alpha, robust_label
 from ..components import card, grid_options, num_col, page_header
 
 VERDICTS = ["all", "ready", "strong", "promising", "weak", "rejected", "submitted"]
@@ -28,6 +28,10 @@ async def query_alphas(f: dict) -> list[Alpha]:
         stmt = stmt.where(Alpha.region == f["region"])
     if f.get("origin") and f["origin"] != "all":
         stmt = stmt.where(Alpha.origin == f["origin"])
+    if f.get("check") and f["check"] != "all":
+        stmt = stmt.where(Alpha.check_state.is_(None) if f["check"] == "unchecked" else Alpha.check_state == f["check"])
+    if f.get("robust") and f["robust"] != "all":
+        stmt = stmt.where(Alpha.robust_state == f["robust"])
     if f.get("min_sharpe") not in (None, ""):
         stmt = stmt.where(Alpha.sharpe >= float(f["min_sharpe"]))
     if f.get("search"):
@@ -46,6 +50,7 @@ def alpha_rows(alphas: list[Alpha]) -> list[dict]:
         "turnover": a.turnover, "returns": a.returns, "drawdown": a.drawdown, "margin": a.margin,
         "region": a.region, "universe": a.universe, "delay": a.delay, "neutralization": a.neutralization,
         "decay": a.decay, "truncation": a.truncation, "ops": a.op_count, "check": a.check_state or "",
+        "robust": robust_label(a), "est_corr": a.est_self_corr, "cluster": a.cluster or "",
         "created": a.date_created.strftime("%Y-%m-%d %H:%M") if a.date_created else "",
         "code": (a.code or a.selection or "")[:300], "origin": a.origin, "score": a.score,
     } for a in alphas]
@@ -65,7 +70,12 @@ ALPHA_COLUMNS = [
     {"field": "truncation", "headerName": "Trunc", "width": 80},
     {"field": "region", "headerName": "Region", "width": 85},
     {"field": "delay", "headerName": "D", "width": 60},
-    {"field": "check", "headerName": "Check", "width": 85},
+    {"field": "check", "headerName": "BRAIN check", "width": 115,
+     "headerTooltip": "pass / fail / pending; stale = you submitted another alpha since, so check again"},
+    {"field": "robust", "headerName": "Robust", "width": 115,
+     "headerTooltip": "AlphaGo's robustness test: share of Sharpe the worst neighbouring setting keeps (< 80% = fragile)"},
+    num_col("est_corr", "Est. self-corr", 2, 120),
+    {"field": "cluster", "headerName": "Idea", "width": 110},
     {"field": "status", "headerName": "Status", "width": 120},
     {"field": "ops", "headerName": "Ops", "width": 70},
     {"field": "created", "headerName": "Created", "width": 140},
@@ -76,7 +86,7 @@ ALPHA_COLUMNS = [
 async def page() -> None:
     page_header("Alphas", "Everything simulated by the app or synced from your BRAIN account. Click a row for details.")
     f = {"verdict": "all", "status": "all", "region": "all", "origin": "all", "min_sharpe": None, "search": "",
-         "order": "score", "limit": 2000}
+         "order": "score", "limit": 2000, "check": "all", "robust": "all"}
 
     with card("w-full"):
         with ui.row().classes("items-end gap-3 w-full flex-wrap"):
@@ -86,6 +96,11 @@ async def page() -> None:
             region = ui.select(["all", "USA", "GLB", "EUR", "ASI", "CHN", "IND", "JPN", "KOR", "TWN", "HKG", "AMR", "GBR"],
                                value="all", label="Region").classes("w-28")
             origin = ui.select(["all", "app", "synced"], value="all", label="Origin").classes("w-28")
+            check = ui.select({"all": "all", "pass": "passed", "fail": "failed", "pending": "pending",
+                               "stale": "re-check needed", "unchecked": "not checked"}, value="all",
+                              label="BRAIN check").classes("w-40")
+            robust = ui.select({"all": "all", "robust": "robust", "fragile": "fragile", "unknown": "untested"},
+                               value="all", label="Robust").classes("w-32")
             min_sharpe = ui.number("Min Sharpe", value=None, step=0.1).classes("w-28")
             order = ui.select({"score": "Score", "sharpe": "Sharpe", "fitness": "Fitness", "newest": "Newest"},
                               value="score", label="Sort").classes("w-32")
@@ -95,13 +110,14 @@ async def page() -> None:
 
         async def reload() -> None:
             f.update(search=search.value or "", verdict=verdict.value, status=status.value, region=region.value,
-                     origin=origin.value, min_sharpe=min_sharpe.value, order=order.value)
+                     origin=origin.value, min_sharpe=min_sharpe.value, order=order.value, check=check.value,
+                     robust=robust.value)
             rows = alpha_rows(await query_alphas(f))
             grid.options["rowData"] = rows
             grid.update()
             count.set_text(f"{len(rows):,} alphas")
 
-        for el in (verdict, status, region, origin, order):
+        for el in (verdict, status, region, origin, order, check, robust):
             el.on_value_change(lambda _: reload())
         search.on("keydown.enter", lambda _: reload())
         min_sharpe.on("keydown.enter", lambda _: reload())

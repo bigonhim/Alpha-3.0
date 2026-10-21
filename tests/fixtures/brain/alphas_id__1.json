@@ -1,0 +1,113 @@
+{
+ "method": "GET",
+ "shape": "/alphas/{id}",
+ "path": "/alphas/Kq7mP2x",
+ "status": 200,
+ "retry_after": null,
+ "json": {
+  "id": "Kq7mP2x",
+  "type": "REGULAR",
+  "author": "REDACTED",
+  "settings": {
+   "instrumentType": "EQUITY",
+   "region": "USA",
+   "universe": "TOP3000",
+   "delay": 1,
+   "decay": 4,
+   "neutralization": "SUBINDUSTRY",
+   "truncation": 0.08,
+   "pasteurization": "ON",
+   "unitHandling": "VERIFY",
+   "nanHandling": "ON",
+   "language": "FASTEXPR",
+   "visualization": false
+  },
+  "regular": {
+   "code": "group_rank(ts_rank(operating_income / cap, 126), subindustry)",
+   "description": null,
+   "operatorCount": 4
+  },
+  "dateCreated": "2026-10-14T09:12:44-04:00",
+  "dateSubmitted": null,
+  "dateModified": "2026-10-14T09:12:44-04:00",
+  "name": "REDACTED",
+  "favorite": false,
+  "hidden": false,
+  "color": null,
+  "category": null,
+  "tags": [],
+  "classifications": [
+   {
+    "id": "DATA_USAGE:SINGLE_DATA_SET",
+    "name": "Single Data Set Alpha"
+   }
+  ],
+  "grade": "AVERAGE",
+  "stage": "IS",
+  "status": "UNSUBMITTED",
+  "is": {
+   "pnl": 4123456,
+   "bookSize": 20000000,
+   "longCount": 1512,
+   "shortCount": 1488,
+   "turnover": 0.1312,
+   "returns": 0.0841,
+   "drawdown": 0.0612,
+   "margin": 0.00128,
+   "sharpe": 1.61,
+   "fitness": 1.27,
+   "startDate": "2021-10-14",
+   "checks": [
+    {
+     "name": "LOW_SHARPE",
+     "result": "PASS",
+     "limit": 1.25,
+     "value": 1.61
+    },
+    {
+     "name": "LOW_FITNESS",
+     "result": "PASS",
+     "limit": 1.0,
+     "value": 1.27
+    },
+    {
+     "name": "LOW_TURNOVER",
+     "result": "PASS",
+     "limit": 0.01,
+     "value": 0.1312
+    },
+    {
+     "name": "HIGH_TURNOVER",
+     "result": "PASS",
+     "limit": 0.7,
+     "value": 0.1312
+    },
+    {
+     "name": "CONCENTRATED_WEIGHT",
+     "result": "PASS"
+    },
+    {
+     "name": "SELF_CORRELATION",
+     "result": "PENDING"
+    },
+    {
+     "name": "MATCHES_COMPETITION",
+     "result": "PASS"
+    }
+   ]
+  },
+  "os": null,
+  "train": null,
+  "test": null,
+  "prod": null,
+  "competitions": null,
+  "themes": null,
+  "pyramids": [
+   {
+    "name": "USA/D1/FUNDAMENTAL",
+    "multiplier": 1.3
+   }
+  ],
+  "team": null
+ }
+}

@@ -22,7 +22,9 @@ from ..db.models import Alpha, Candidate, Simulation
 from ..events import bus
 from ..fastexpr import canonical_hash, compute_metrics, skeleton_hash, validate
 from .catalogs import field_dataset_map, get_catalog
+from .clusters import classify
 from .ingest import journal, upsert_alpha
+from .similarity import likely_duplicate, submitted_shapes
 
 log = logging.getLogger(__name__)
 
@@ -150,12 +152,15 @@ class SimulationService:
 
     async def prepare(self, specs: list[CandidateSpec], *, batch_id: int | None = None, family_cap: int | None = None,
                       initial_status: str = "new", task_id: int | None = None,
-                      history_cap: int | None = None) -> PrepareResult:
+                      history_cap: int | None = None, cluster_cap: bool = False) -> PrepareResult:
         """Validate, de-duplicate and store candidates.
 
         family_cap:  at most N candidates per expression skeleton in this call.
         history_cap: skip skeletons already simulated N+ times in this region/delay ("shapes this market has already
-                     answered"). Skip reasons are counted in `PrepareResult.left_out`.
+                     answered").
+        cluster_cap: apply the daily cap per economic idea (automatic research only).
+        Generated ideas that copy a submitted alpha's skeleton and fields are left out (settings.research.
+        duplicate_filter). Skip reasons are counted in `PrepareResult.left_out`.
         """
         result = PrepareResult()
         staged: list[tuple[CandidateSpec, dict[str, Any], Any]] = []
@@ -176,6 +181,10 @@ class SimulationService:
         seen: set[tuple[str, str]] = set()
         families: dict[str, int] = {}
         rows: list[Candidate] = []
+        research = app_settings.research
+        submitted: dict[tuple[str, int], list] = {}
+        categories: dict[tuple[str, int, str], dict[str, str | None]] = {}
+        cluster_counts = await self._cluster_counts_today() if cluster_cap and research.cluster_share > 0 else None
         for spec, settings, vr in staged:
             region, delay, universe = settings["region"], settings["delay"], settings["universe"]
             sh = settings_hash(settings)
@@ -183,7 +192,9 @@ class SimulationService:
                         delay=delay, origin=spec.origin, parent_id=spec.parent_id,
                         parent_alpha_id=spec.parent_alpha_id, batch_id=batch_id, hypothesis=spec.hypothesis,
                         rationale=spec.rationale, dataset_id=spec.dataset_id,
-                        task_id=task_id if task_id is not None else spec.task_id)
+                        task_id=task_id if task_id is not None else spec.task_id,
+                        llm_model=(spec.rationale or {}).get("llm_model"),
+                        prompt_version=(spec.rationale or {}).get("prompt_version"))
             if not vr.ok or vr.program is None:
                 cand = Candidate(**base, status="invalid",
                                  error="; ".join(i.message for i in vr.errors)[:2000] or "invalid expression")
@@ -213,9 +224,16 @@ class SimulationService:
                 fmap = await field_dataset_map(region, delay, universe)
                 ds = sorted({fmap[f] for f in m.non_group_fields if f in fmap})
                 dataset_id = ds[0] if len(ds) == 1 else (",".join(ds) if ds else None)
+            scope_key = (region, delay, universe)
+            if scope_key not in categories:
+                categories[scope_key] = await self._dataset_categories(region, delay, universe)
+            first_ds = str(dataset_id or "").split(",")[0]
+            cluster = classify(spec.expression, fields=m.non_group_fields, operators=m.unique_operators,
+                               windows=m.windows, category=categories[scope_key].get(first_ds),
+                               mechanism=(spec.rationale or {}).get("mechanism"))
             base.update(canonical_hash=ch, skeleton_hash=sk, fields=sorted(m.fields),
                         operators=sorted(m.unique_operators), op_count=m.operator_count,
-                        field_count=len(m.non_group_fields), dataset_id=dataset_id)
+                        field_count=len(m.non_group_fields), dataset_id=dataset_id, cluster=cluster)
             reuse_alpha = existing.get((ch, sh))
             if reuse_alpha:
                 cand = Candidate(**base, status="reused", alpha_id=reuse_alpha, finished_at=utcnow())
@@ -223,6 +241,22 @@ class SimulationService:
                 result.reused.append(cand)
                 result.leave("already simulated (result reused)")
                 continue
+            if spec.origin in GENERATED_ORIGINS and research.duplicate_filter:
+                if (region, delay) not in submitted:
+                    submitted[(region, delay)] = await submitted_shapes(region, delay)
+                dup = likely_duplicate(sk, set(m.fields), submitted[(region, delay)])
+                if dup:
+                    result.skipped += 1
+                    result.leave(f"likely duplicate of submitted alpha {dup}")
+                    continue
+            if cluster_counts is not None and spec.origin in GENERATED_ORIGINS:
+                total = sum(cluster_counts.values())
+                cap = max(research.cluster_min, research.cluster_share * max(research.autopilot_daily_cap, total))
+                if cluster_counts.get(cluster, 0) >= cap:
+                    result.skipped += 1
+                    result.leave(f"idea '{cluster}' reached today's share of simulations")
+                    continue
+                cluster_counts[cluster] = cluster_counts.get(cluster, 0) + 1
             cand = Candidate(**base, status=initial_status)
             rows.append(cand)
             result.created.append(cand)
@@ -249,6 +283,24 @@ class SimulationService:
                     if (ch, sh) in wanted:
                         out.setdefault((ch, sh), aid)
         return out
+
+    async def _cluster_counts_today(self) -> dict[str, int]:
+        """Generated candidates per economic idea since the BRAIN day began (midnight New York)."""
+        from ..brain.quota import EASTERN
+        start = datetime.now(EASTERN).replace(hour=0, minute=0, second=0, microsecond=0).astimezone(timezone.utc)
+        async with db.session() as s:
+            rows = (await s.execute(select(Candidate.cluster, func.count()).where(
+                Candidate.created_at >= start, Candidate.origin.in_(GENERATED_ORIGINS),
+                Candidate.status.in_(["new", "approved", "queued", "simulating", "done", "error"]))
+                .group_by(Candidate.cluster))).all()
+        return {c or "other": n for c, n in rows}
+
+    async def _dataset_categories(self, region: str, delay: int, universe: str) -> dict[str, str | None]:
+        from ..db.models import Dataset
+        async with db.session() as s:
+            rows = (await s.execute(select(Dataset.id, Dataset.category_name).where(
+                Dataset.region == region, Dataset.delay == delay, Dataset.universe == universe))).all()
+        return {i: c for i, c in rows}
 
     async def _skeleton_history(self, keys: set[tuple[str, str, int]]) -> dict[tuple[str, str, int], int]:
         skels = sorted({k[0] for k in keys})
@@ -446,6 +498,11 @@ class SimulationService:
             self._wake.set()
 
     async def _run_pack_inner(self, pack: list[Candidate]) -> None:
+        from .audit import ACTOR
+        first = pack[0]
+        ACTOR.set(f"task:{first.task_id}" if first.task_id is not None else
+                  f"batch:{first.batch_id}" if first.batch_id is not None else
+                  "optimizer" if first.origin in ("optimize", "robustness") else "you")
         ids = [c.id for c in pack]
         self._inflight_candidates += len(pack)
         await self._set_status(ids, status="simulating")

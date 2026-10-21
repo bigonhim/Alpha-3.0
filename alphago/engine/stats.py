@@ -61,6 +61,12 @@ async def dashboard_numbers() -> dict[str, Any]:
                                                                           Alpha.status == "UNSUBMITTED")),
             "strong": await count(select(func.count(Alpha.id)).where(Alpha.verdict == "strong",
                                                                      Alpha.status != "ACTIVE")),
+            "ready_fragile": await count(select(func.count(Alpha.id)).where(
+                Alpha.verdict == "ready", Alpha.status == "UNSUBMITTED", Alpha.robust_state == "fragile")),
+            "ready_robust": await count(select(func.count(Alpha.id)).where(
+                Alpha.verdict == "ready", Alpha.status == "UNSUBMITTED", Alpha.robust_state == "robust")),
+            "recheck": await count(select(func.count(Alpha.id)).where(Alpha.check_state == "stale",
+                                                                      Alpha.status == "UNSUBMITTED")),
             "submitted": await count(select(func.count(Alpha.id)).where(Alpha.status == "ACTIVE")),
             "datasets": await count(select(func.count(func.distinct(Dataset.id)))),
             "dataset_scopes": await count(select(func.count(Dataset.pk))),

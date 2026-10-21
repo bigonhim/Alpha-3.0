@@ -156,6 +156,18 @@ async def page() -> None:
             lang = ui.select(["English", "Hinglish"], value=cfg.ai_language,
                              label="Language of AI explanations (Osmosis Review)").classes("w-72")
             lang.on_value_change(lambda e: (setattr(cfg, "ai_language", e.value), settings.save()))
+            fallbacks = ui.select(PROVIDER_LABELS, value=list(cfg.fallbacks), multiple=True,
+                                  label="Fallback providers (used in this order when the active one fails)").classes(
+                "w-96").props("use-chips")
+            fallbacks.tooltip("When the active provider is rate-limited, overloaded, timing out or its model is "
+                              "unavailable, the call moves to the next provider that has a key instead of falling "
+                              "back to templates. The failed provider is retried after 10 minutes.")
+            fallbacks.on_value_change(lambda e: (setattr(cfg, "fallbacks", [v for v in (e.value or [])
+                                                                            if v != cfg.provider]), settings.save()))
+            self_chk = ui.checkbox("AI self-check before simulating", value=cfg.self_check).tooltip(
+                "One extra AI call per batch critiques the ideas (overfitting, duplicates, wrong field types, "
+                "look-ahead) and drops the worst — at most a quarter. Costs no BRAIN quota.")
+            self_chk.on_value_change(lambda e: (setattr(cfg, "self_check", bool(e.value)), settings.save()))
             usage = ui.label().classes("ag-muted text-sm")
             chart_box = ui.column().classes("w-full")
 
@@ -193,6 +205,70 @@ async def page() -> None:
             await refresh()
             ui.timer(10.0, refresh)
 
+    from ...engine import tournament as tourney
+    t = cfg.tournament
+    with card("w-full"):
+        with ui.row().classes("items-center w-full gap-3"):
+            ui.label("Model tournament (ideation)").classes("ag-section-title")
+            ui.label("The same ideation prompt goes to 2–3 models in turn; the scoreboard shows which one yields "
+                     "more promising / strong alphas per call and per 100 simulations. After each model has enough "
+                     "simulated ideas, calls follow the results.").classes("ag-muted text-sm")
+        with ui.row().classes("items-end gap-3 w-full"):
+            t_on = ui.switch("Tournament on", value=t.enabled)
+            t_list = ui.input("Contestants (provider:model, comma separated)", value=", ".join(t.contestants),
+                              placeholder="gemini:gemini-3-flash, claude:claude-sonnet-5-5").classes("grow")
+            t_min = ui.number("Ideas each before following results", value=t.min_ideas, min=10, step=10).classes(
+                "w-64")
+        board = ui.aggrid({"columnDefs": [
+            {"field": "label", "headerName": "Model", "minWidth": 260, "flex": 1},
+            {"field": "calls", "headerName": "Calls", "width": 85},
+            {"field": "ideas", "headerName": "Ideas", "width": 85},
+            {"field": "valid_share", "headerName": "Valid", "width": 85,
+             ":valueFormatter": "p => p.value == null ? '—' : (p.value * 100).toFixed(0) + '%'"},
+            {"field": "simulated", "headerName": "Simulated", "width": 105},
+            {"field": "promising_plus", "headerName": "Promising+", "width": 110},
+            {"field": "strong_plus", "headerName": "Strong+", "width": 95},
+            {"field": "passed", "headerName": "Passed check", "width": 120},
+            {"field": "strong_per_call", "headerName": "Strong / call", "width": 115},
+            {"field": "strong_per_100", "headerName": "Strong / 100 sims", "width": 140},
+            {"field": "range", "headerName": "80% range", "width": 110},
+            {"field": "status", "headerName": "", "width": 90}], "rowData": []}, theme="quartz").classes(
+            "w-full h-56")
+
+        async def load_board() -> None:
+            rows = await tourney.scoreboard()
+            for r in rows:
+                r["range"] = f"{r['strong_per_100_lo']:.0f}–{r['strong_per_100_hi']:.0f}"
+                r["status"] = "LOCKED" if r["locked"] else ("competing" if r["contestant"] else "")
+            board.options["rowData"] = rows
+            board.update()
+
+        def save_tournament() -> None:
+            t.enabled = bool(t_on.value)
+            t.contestants = [x.strip() for x in (t_list.value or "").split(",") if ":" in x]
+            t.min_ideas = int(t_min.value or 60)
+            settings.save()
+            ui.notify("Tournament settings saved." + ("" if len(t.contestants) >= 2 or not t.enabled else
+                                                      " Add at least two contestants."))
+
+        async def lock() -> None:
+            winner = await tourney.lock_winner()
+            ui.notify(f"Locked {winner}: every ideation call now goes to it." if winner else
+                      f"No contestant has {t.min_ideas} simulated ideas yet.", type="positive" if winner else "info")
+            await load_board()
+
+        def unlock() -> None:
+            t.locked = ""
+            settings.save()
+            ui.notify("Unlocked: the contestants compete again.")
+
+        with ui.row().classes("gap-2"):
+            ui.button("Save", icon="save", on_click=save_tournament).props("flat")
+            ui.button("Lock the winner", icon="emoji_events", on_click=lock).props("flat")
+            ui.button("Unlock", icon="lock_open", on_click=unlock).props("flat")
+            ui.button("Refresh scoreboard", icon="refresh", on_click=load_board).props("flat")
+        await load_board()
+
     with card("w-full"):
         with ui.row().classes("items-center w-full"):
             ui.label("Prompt templates").classes("ag-section-title")
@@ -206,13 +282,15 @@ async def page() -> None:
                 editor.value = await get_template(which.value)
 
             async def save() -> None:
-                await set_template(which.value, editor.value if editor.value != DEFAULTS[which.value] else None)
-                ui.notify("Template saved.", type="positive")
+                vid = await set_template(which.value, editor.value if editor.value != DEFAULTS[which.value] else None)
+                ui.notify(f"Template saved as version #{vid}.", type="positive")
+                await load_versions()
 
             async def reset() -> None:
                 await set_template(which.value, None)
                 editor.value = DEFAULTS[which.value]
                 ui.notify("Reset to default.")
+                await load_versions()
 
             async def show_pack() -> None:
                 text = await static_prefix()
@@ -225,5 +303,68 @@ async def page() -> None:
             ui.button("Save template", icon="save", on_click=save)
             ui.button("Reset to default", icon="restart_alt", on_click=reset).props("flat")
             ui.button("View knowledge pack", icon="menu_book", on_click=show_pack).props("flat")
-        which.on_value_change(lambda _: load())
+        hint = ui.label().classes("ag-muted text-xs")
+        ui.label("Versions — every save is kept with what its ideas went on to do (ideation only)").classes(
+            "ag-section-title mt-2")
+        versions_grid = ui.aggrid({"columnDefs": [
+            {"field": "id", "headerName": "#", "width": 70, "checkboxSelection": True},
+            {"field": "created", "headerName": "Saved", "width": 150},
+            {"field": "source", "headerName": "Kind", "width": 90},
+            {"field": "note", "headerName": "Note", "width": 200},
+            {"field": "ideas", "headerName": "Ideas", "width": 85},
+            {"field": "simulated", "headerName": "Simulated", "width": 105},
+            {"field": "promising_plus", "headerName": "Promising+", "width": 110},
+            {"field": "strong_plus", "headerName": "Strong+", "width": 95},
+            {"field": "passed", "headerName": "Passed check", "width": 120},
+            {"field": "strong_per_100", "headerName": "Strong / 100 sims", "width": 140}],
+            "rowData": [], "rowSelection": "single"}, theme="quartz").classes("w-full h-52")
+
+        async def load_versions() -> None:
+            from ...engine.tournament import prompt_results
+            versions_grid.options["rowData"] = await prompt_results(which.value)
+            versions_grid.update()
+            text = editor.value or ""
+            hint.set_text("This custom ideation template does not include {{ review_examples }} — add it to show the "
+                          "AI how you approved, rejected and rewrote earlier ideas."
+                          if which.value == "ideation" and "review_examples" not in text else "")
+
+        async def selected_version():  # noqa: ANN202
+            rows = await versions_grid.get_selected_rows()
+            if not rows:
+                ui.notify("Select a version first.", type="warning")
+                return None
+            from ...llm.prompts import versions
+            return next((v for v in await versions(which.value) if v.id == rows[0]["id"]), None)
+
+        async def show_diff() -> None:
+            from ...llm.prompts import diff, versions
+            v = await selected_version()
+            if v is None:
+                return
+            older = [x for x in await versions(which.value) if x.id < v.id]
+            text = diff(older[0].text, v.text) if older else "(first version)"
+            with ui.dialog() as d, ui.card().classes("ag-card p-5 w-[1000px] max-w-[95vw]"):
+                ui.label(f"Version #{v.id} vs the one before").classes("font-semibold")
+                ui.code(text or "(no change)", language="diff").classes("w-full text-xs")
+            d.open()
+
+        async def restore() -> None:
+            from ...llm.prompts import restore_version
+            v = await selected_version()
+            if v is None:
+                return
+            vid = await restore_version(v.id)
+            editor.value = await get_template(which.value)
+            ui.notify(f"Restored version #{v.id} (saved as #{vid}).", type="positive")
+            await load_versions()
+
+        with ui.row().classes("gap-2"):
+            ui.button("Diff with previous", icon="difference", on_click=show_diff).props("flat")
+            ui.button("Restore this version", icon="history", on_click=restore).props("flat")
+        async def on_template_change() -> None:
+            await load()
+            await load_versions()
+
+        which.on_value_change(lambda _: on_template_change())
         await load()
+        await load_versions()

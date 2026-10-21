@@ -45,9 +45,33 @@ def check_map(checks: list[dict[str, Any]] | None) -> dict[str, dict[str, Any]]:
     return {str(c.get("name")): c for c in (checks or []) if c.get("name")}
 
 
+def blocking_failures(checks: list[dict[str, Any]] | None) -> list[str]:
+    """Names of FAIL/ERROR checks that block submission (the one rule shared by the evaluator and /check)."""
+    return [str(c.get("name")) for c in checks or []
+            if str(c.get("result", "")).upper() in ("FAIL", "ERROR") and str(c.get("name")) not in NON_BLOCKING]
+
+
+def pending_checks(checks: list[dict[str, Any]] | None) -> list[str]:
+    return [str(c.get("name")) for c in checks or []
+            if str(c.get("result", "")).upper() == "PENDING" and str(c.get("name")) not in NON_BLOCKING]
+
+
+def check_state_of(checks: list[dict[str, Any]] | None) -> str:
+    """State of a full BRAIN /check result: fail | pending | pass."""
+    return "fail" if blocking_failures(checks) else ("pending" if pending_checks(checks) else "pass")
+
+
+def _delay(delay: Any) -> int:
+    """Delay as an int; None means the usual Delay 1 (0 stays 0 — `int(delay or 1)` turned D0 into D1)."""
+    try:
+        return 1 if delay is None else int(delay)
+    except (TypeError, ValueError):
+        return 1
+
+
 def limits_for(checks: list[dict[str, Any]] | None, delay: int | None) -> tuple[float, float]:
     cm = check_map(checks)
-    fb_sharpe, fb_fitness = FALLBACK_LIMITS.get(int(delay or 1), FALLBACK_LIMITS[1])
+    fb_sharpe, fb_fitness = FALLBACK_LIMITS.get(_delay(delay), FALLBACK_LIMITS[1])
     sharpe_lim = _f((cm.get("LOW_SHARPE") or {}).get("limit")) or fb_sharpe
     fitness_lim = _f((cm.get("LOW_FITNESS") or {}).get("limit")) or fb_fitness
     return sharpe_lim, fitness_lim
@@ -120,6 +144,19 @@ def evaluate(
             score -= 5
     score -= 6 * len(blocking)
     ev.score = round(max(score, 0.0), 2)
+    return ev
+
+
+def reverdict(row: Any) -> Evaluation:
+    """Recompute an Alpha row's verdict and score from its stored state.
+
+    Shared by simulation ingest, account sync and /check, so the label cannot flip between code paths. `checks` holds
+    BRAIN's latest full check result when one ran (else the simulation's IS checks); `check_state` "pass" means BRAIN's
+    /check passed. A "stale" pass (another alpha was submitted since) no longer counts until it is re-checked. The
+    app's robustness test never changes the verdict: a fragile alpha stays "ready" and carries a badge."""
+    ev = evaluate(sharpe=row.sharpe, fitness=row.fitness, turnover=row.turnover, checks=row.checks, delay=row.delay,
+                  region=row.region, status=row.status, full_check_passed=row.check_state == "pass")
+    row.verdict, row.score = ev.verdict, ev.score
     return ev
 
 

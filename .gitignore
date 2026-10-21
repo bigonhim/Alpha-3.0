@@ -12,3 +12,4 @@ dist/
 *.db-shm
 .claude/settings.local.json
 docs/reference/
+debug.log

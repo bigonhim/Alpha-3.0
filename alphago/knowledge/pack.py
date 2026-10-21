@@ -31,7 +31,8 @@ FASTEXPR (WorldQuant BRAIN alpha language) — rules you MUST follow:
 """
 
 SUBMISSION_RULES = """\
-Submission tests (BRAIN computes; limits come from the platform, typical consultant Delay-1 values):
+Submission tests (BRAIN computes; limits come from the platform — the numbers below are typical values, NOT verified
+for this account; when "your account's limits" are listed further down, those are authoritative):
 - Sharpe ≥ 1.58 (D0: 2.69), Fitness ≥ 1.0 (D0: 1.5). Fitness = Sharpe * sqrt(|Returns| / max(Turnover, 0.125)).
 - Turnover between 1% and 70%; very high turnover destroys fitness, below 12.5% costs nothing extra.
 - No stock above 10% weight (CONCENTRATED_WEIGHT) – rank()/truncation fix this.
@@ -65,17 +66,55 @@ async def operator_reference(limit: int = 220) -> str:
     return "Available operators (signature — meaning):\n" + "\n".join(lines)
 
 
-async def static_prefix() -> str:
-    """Large, rarely-changing prefix: identical across calls so the provider can cache it."""
+# check name -> how its limit reads ("≥" for minimums, "≤" for maximums)
+_LIMIT_SIDE = {"LOW_SHARPE": "Sharpe ≥", "LOW_FITNESS": "Fitness ≥", "LOW_TURNOVER": "Turnover ≥",
+               "HIGH_TURNOVER": "Turnover ≤", "CONCENTRATED_WEIGHT": "max stock weight ≤",
+               "LOW_SUB_UNIVERSE_SHARPE": "sub-universe Sharpe ≥", "IS_LADDER_SHARPE": "IS-ladder Sharpe ≥",
+               "LOW_2Y_SHARPE": "last-2-year Sharpe ≥", "SELF_CORRELATION": "self-correlation ≤",
+               "PROD_CORRELATION": "production correlation ≤"}
+
+
+async def observed_limits(region: str | None, delay: int | None, sample: int = 300) -> dict[str, float]:
+    """The latest `limit` BRAIN reported for each check in this region/delay (from stored check results)."""
+    if region is None:
+        return {}
+    async with db.session() as s:
+        stmt = select(Alpha.checks, Alpha.is_checks).where(Alpha.region == region)
+        if delay is not None:
+            stmt = stmt.where(Alpha.delay == delay)
+        rows = (await s.execute(stmt.order_by(Alpha.updated_at.desc()).limit(sample))).all()
+    out: dict[str, float] = {}
+    for checks, is_checks in rows:
+        for c in (checks or []) + (is_checks or []):
+            name, limit = c.get("name"), c.get("limit")
+            if name and name not in out and isinstance(limit, (int, float)):
+                out[str(name)] = float(limit)
+    return out
+
+
+def limits_text(limits: dict[str, float], region: str | None = None, delay: int | None = None) -> str:
+    if not limits:
+        return ""
+    parts = [f"{_LIMIT_SIDE[k]} {v:g}" for k, v in sorted(limits.items()) if k in _LIMIT_SIDE] + \
+            [f"{k}: limit {v:g}" for k, v in sorted(limits.items()) if k not in _LIMIT_SIDE]
+    scope = f" for {region} D{delay}" if region else ""
+    return f"Your account's limits as last reported by BRAIN{scope} (authoritative): " + "; ".join(parts) + "."
+
+
+async def static_prefix(region: str | None = None, delay: int | None = None) -> str:
+    """Large, rarely-changing prefix: identical across calls so the provider can cache it. With a scope, BRAIN's
+    observed limits for that region/delay are added (they rarely change, so caching still works)."""
     ops = await operator_reference()
-    return "\n\n".join([
+    observed = limits_text(await observed_limits(region, delay), region, delay) if region else ""
+    return "\n\n".join(part for part in [
         "You are a senior quantitative researcher writing WorldQuant BRAIN alphas.",
         FASTEXPR_RULES,
         SUBMISSION_RULES,
+        observed,
         ops,
         "Proven templates ({f},{f2} fields, {d} window, {g} group):\n" + template_catalog_text(),
         "Classic examples:\n" + "\n".join(f"- {e}" for e in PRICE_VOLUME_SEEDS + FUNDAMENTAL_SEEDS),
-    ])
+    ] if part)
 
 
 async def dataset_context(dataset_id: str, region: str, delay: int, universe: str, max_fields: int = 120) -> str:
@@ -117,6 +156,49 @@ async def best_examples(region: str, limit: int = 8) -> list[str]:
         if len(out) >= limit:
             break
     return out
+
+
+EDIT_MARK = "replaced by an edited expression"
+
+
+async def review_examples(region: str, per_kind: int = 6, max_chars: int = 180) -> str:
+    """Your own review of earlier AI batches, as examples for the next one: ideas you approved (best results
+    first), ideas you rejected before any simulation, and expressions you rewrote (the model's → yours)."""
+    from sqlalchemy.orm import aliased
+
+    from ..db.models import AutopilotRun, Batch, Candidate
+    parent = aliased(Candidate)
+    async with db.session() as s:
+        approved = (await s.execute(
+            select(Candidate.expression, Alpha.verdict, Alpha.sharpe)
+            .join(Batch, Batch.id == Candidate.batch_id).join(AutopilotRun, AutopilotRun.id == Batch.run_id)
+            .outerjoin(Alpha, Alpha.id == Candidate.alpha_id)
+            .where(AutopilotRun.mode == "assisted", Candidate.region == region, Candidate.parent_id.is_(None),
+                   Candidate.status.in_(["done", "queued", "simulating", "reused"]))
+            .order_by(Alpha.score.desc().nulls_last(), Candidate.id.desc()).limit(per_kind))).all()
+        rejected = list(await s.scalars(
+            select(Candidate.expression).where(Candidate.region == region, Candidate.status == "rejected_by_user",
+                                               Candidate.error.is_(None))
+            .order_by(Candidate.id.desc()).limit(per_kind)))
+        edits = (await s.execute(
+            select(parent.expression, Candidate.expression).join(parent, parent.id == Candidate.parent_id)
+            .where(Candidate.region == region, parent.status == "rejected_by_user", parent.error == EDIT_MARK)
+            .order_by(Candidate.id.desc()).limit(per_kind))).all()
+    if not (approved or rejected or edits):
+        return ""
+    cut = lambda e: (e or "")[:max_chars]  # noqa: E731
+    lines = ["How the researcher reviewed earlier AI ideas — learn their preferences, do not copy these:"]
+    if approved:
+        lines.append("Approved (with how they did once simulated):")
+        lines += [f"- {cut(e)}" + (f"  → {v}, Sharpe {sh:.2f}" if v and sh is not None else "  → not simulated yet")
+                  for e, v, sh in approved]
+    if rejected:
+        lines.append("Rejected before any simulation (avoid ideas like these):")
+        lines += [f"- {cut(e)}" for e in rejected]
+    if edits:
+        lines.append("Rewritten by the researcher (yours → theirs; write the way they rewrite):")
+        lines += [f"- {cut(a)}\n  → {cut(b)}" for a, b in edits]
+    return "\n".join(lines)
 
 
 async def avoid_list(region: str, dataset_id: str | None = None, limit: int = 25) -> list[str]:

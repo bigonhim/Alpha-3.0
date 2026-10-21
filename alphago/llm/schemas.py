@@ -21,6 +21,17 @@ class IdeaBatch(BaseModel):
     ideas: list[AlphaIdea]
 
 
+class IdeaReview(BaseModel):
+    index: int = Field(description="Index of the idea in the list")
+    keep: bool = Field(default=True, description="false only for a serious problem")
+    issues: list[str] = Field(default_factory=list, description="overfit | duplicate | field_type | lookahead")
+    reason: str = Field(default="", description="One short sentence")
+
+
+class BatchCritique(BaseModel):
+    reviews: list[IdeaReview]
+
+
 class FieldNote(BaseModel):
     field: str
     meaning: str

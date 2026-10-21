@@ -1,4 +1,7 @@
-"""Prompt templates (Jinja2). Defaults live here; edits from the LLM Integration page are stored in the database."""
+"""Prompt templates (Jinja2). Defaults live here; edits from the LLM Integration page are stored in the database.
+
+Every saved or reset version is kept (`PromptVersion`), and AI ideas record the version their prompt came from, so a
+change to a template can be judged by what its ideas went on to do in BRAIN."""
 
 from __future__ import annotations
 
@@ -24,6 +27,8 @@ Target settings: {{ settings }}
 {% if avoid %}Ideas that already FAILED (avoid these shapes):
 {{ avoid }}
 {% endif %}
+{% if review_examples %}{{ review_examples }}
+{% endif %}
 Requirements:
 - Use ONLY fields listed above (plus pv1 basics: close, open, high, low, vwap, volume, returns, cap, adv20) and
   ONLY operators from the operator list.
@@ -42,8 +47,15 @@ Alpha: {{ expression }}
 Settings: {{ settings }}
 In-sample: Sharpe {{ sharpe }}, Fitness {{ fitness }}, Turnover {{ turnover }}, Returns {{ returns }},
 Drawdown {{ drawdown }}, Margin {{ margin }}
-Failing / warning checks:
+Failing / warning checks (value vs BRAIN's limit):
 {{ failing }}
+{% if tried %}Fixes already tried on this alpha or its parents, with what happened (do NOT repeat these):
+{{ tried }}
+{% endif %}
+{% if collide %}It is too correlated with this submitted alpha — keep the idea but make it economically different
+(other data, horizon, conditioning or grouping), not a reworded copy:
+{{ collide }}
+{% endif %}
 {% if yearly %}Yearly stats:
 {{ yearly }}
 {% endif %}
@@ -124,6 +136,22 @@ below {{ min_sharpe2y }} or turnover above {{ max_turnover }}; avoid concentrati
 Answer in {{ language }}{% if language == "Hinglish" %} (Hindi written in Latin script mixed with English finance
 terms){% endif %}. Return JSON matching the schema.""",
 
+    "self_check": """\
+TASK: Critique this batch of WorldQuant BRAIN alpha ideas BEFORE any simulation is spent on them. For each idea (by
+its index) list the problems you find:
+- overfit: exotic constants, data-mined thresholds, many operators or fields for a simple idea;
+- duplicate: the same economic idea as another idea in this batch (say which index);
+- field_type: a VECTOR field used without vec_avg/vec_sum, a GROUP field outside a group_* argument, or a field that is
+  not in the dataset below;
+- lookahead: anything that could use future information.
+Set keep=false only for ideas with a serious problem; most ideas should be kept.
+
+{{ dataset_context }}
+
+Ideas:
+{{ ideas }}
+Return JSON matching the schema.""",
+
     "research_plan": """\
 You plan today's WorldQuant BRAIN research for {{ scope }}.
 Research focus requested: {{ focus }}.
@@ -143,8 +171,56 @@ async def get_template(name: str) -> str:
     return override or DEFAULTS[name]
 
 
-async def set_template(name: str, text: str | None) -> None:
+async def set_template(name: str, text: str | None, *, note: str | None = None, source: str | None = None) -> int:
+    """Save (text) or reset (None) a template; every change becomes a new version. Returns the version id."""
     await db.kv_set(f"prompt:{name}", text or None)
+    effective = text or DEFAULTS[name]
+    return await _record(name, effective, source or ("user" if text else "default"), note)
+
+
+async def _record(name: str, text: str, source: str, note: str | None = None) -> int:
+    from sqlalchemy import select
+
+    from ..db.models import PromptVersion
+    async with db.write() as s:
+        last = await s.scalar(select(PromptVersion).where(PromptVersion.name == name)
+                              .order_by(PromptVersion.id.desc()).limit(1))
+        if last is not None and last.text == text:
+            return last.id
+        row = PromptVersion(name=name, text=text, source=source, note=note)
+        s.add(row)
+        await s.flush()
+        return row.id
+
+
+async def current_version(name: str) -> int:
+    """Id of the version in use (the text is recorded as a version the first time it is used)."""
+    text = await get_template(name)
+    return await _record(name, text, "default" if text == DEFAULTS[name] else "user")
+
+
+async def versions(name: str) -> list:
+    from sqlalchemy import select
+
+    from ..db.models import PromptVersion
+    async with db.session() as s:
+        return list(await s.scalars(select(PromptVersion).where(PromptVersion.name == name)
+                                    .order_by(PromptVersion.id.desc())))
+
+
+async def restore_version(version_id: int) -> int:
+    from ..db.models import PromptVersion
+    async with db.session() as s:
+        row = await s.get(PromptVersion, version_id)
+    if row is None:
+        raise KeyError(version_id)
+    text = None if row.text == DEFAULTS.get(row.name) else row.text
+    return await set_template(row.name, text, note=f"restored from version #{version_id}", source="restored")
+
+
+def diff(old: str, new: str) -> str:
+    import difflib
+    return "\n".join(difflib.unified_diff(old.splitlines(), new.splitlines(), "before", "after", lineterm=""))
 
 
 async def render(name: str, **variables: object) -> str:

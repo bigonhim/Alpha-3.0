@@ -10,6 +10,7 @@ import random
 import re
 import time
 from contextlib import asynccontextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, AsyncIterator, TypeVar
@@ -26,6 +27,45 @@ log = logging.getLogger(__name__)
 T = TypeVar("T", bound=BaseModel)
 PACIFIC = ZoneInfo("America/Los_Angeles")
 ROLES = ("ideation", "refine", "describe")
+
+# per-call context: the model tournament forces a model; ideation records which prompt version it rendered
+MODEL_OVERRIDE: ContextVar[str | None] = ContextVar("llm_model_override", default=None)
+PROMPT_VERSION: ContextVar[int | None] = ContextVar("llm_prompt_version", default=None)
+
+ERROR_KINDS = ("rate_limited", "timeout", "model_unavailable", "server_error", "auth", "budget", "bad_json", "other")
+
+
+def classify_error(error: str | None) -> str | None:
+    """Kind of a logged LLM error ("429: ...", "Gemini error 404: ...", "timed out", ...) for the Health page."""
+    if not error:
+        return None
+    e = error.lower()
+    code = None
+    m = re.search(r"\b([1-5]\d\d)\b", e)
+    if m:
+        code = int(m.group(1))
+    if "budget" in e:
+        return "budget"
+    if code == 429 or "rate limit" in e or "rate_limit" in e or "resource_exhausted" in e or "quota" in e \
+            or "too many requests" in e:
+        return "rate_limited"
+    if code in (408, 504) or "timeout" in e or "timed out" in e:
+        return "timeout"
+    if code == 404 or ("model" in e and ("not found" in e or "does not exist" in e or "unavailable" in e
+                                         or "not supported" in e)):
+        return "model_unavailable"
+    if code in (401, 403) or "api key" in e or "permission" in e or "unauthorized" in e:
+        return "auth"
+    if (code is not None and code >= 500) or "overloaded" in e or "unavailable" in e:
+        return "server_error"
+    if "json" in e or "schema" in e:
+        return "bad_json"
+    return "other"
+
+
+def chosen_model(provider: Any, role: str) -> str:
+    """The tournament's forced model for this call, else the provider's pick for the role."""
+    return MODEL_OVERRIDE.get() or provider.pick(role)
 
 
 class LLMError(Exception):
@@ -92,7 +132,9 @@ async def log_call(provider: str, model: str, purpose: str, started: float, *, p
         async with db.write() as s:
             s.add(LLMCall(provider=provider, model=model[:64], purpose=purpose, prompt_tokens=prompt_tokens,
                           output_tokens=output_tokens, cached_tokens=cached_tokens,
-                          latency_ms=int((time.monotonic() - started) * 1000), status=status, error=error))
+                          latency_ms=int((time.monotonic() - started) * 1000), status=status, error=error,
+                          error_kind=classify_error(error) if status != "ok" else None,
+                          prompt_version=PROMPT_VERSION.get()))
     except Exception:
         log.exception("could not log LLM call")
 
@@ -233,7 +275,7 @@ class ChatProvider:
             await check_budget(self.label)
         if not self.configure():
             raise LLMError(f"{self.label} is not set up — add it on the 'LLM Integration' page.")
-        model = self.pick(role)
+        model = chosen_model(self, role)
         if not model:
             raise LLMError(f"No {self.label} model chosen — pick one on the 'LLM Integration' page.")
         level = (thinking or settings.llm.thinking_level or "").lower()

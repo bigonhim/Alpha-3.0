@@ -41,7 +41,9 @@ DS_COLUMNS = [
     {"field": "recommended_label", "headerName": "Recommended", "width": 135, ":cellRenderer": REC_RENDER},
     {"field": "field_count", "headerName": "Fields", "width": 90, "type": "numericColumn"},
     {"field": "tried", "headerName": "Tested", "width": 95, "type": "numericColumn",
-     "headerTooltip": "Your simulations on this dataset"},
+     "headerTooltip": "Your first-pass simulations on this dataset (repairs and robustness tests not counted)"},
+    {"field": "passed", "headerName": "Passed", "width": 95, "type": "numericColumn",
+     "headerTooltip": "Ideas from this dataset that passed BRAIN's submission check (directly or after repair)"},
     {**num_col("pyramid_multiplier", "Pyramid ×", 1, 105)},
     {**num_col("opportunity", "Opportunity", 0, 115), "headerTooltip": "v1 score: pyramid multiplier, value score, "
                                                                       "low crowding, coverage, your hit rate"},

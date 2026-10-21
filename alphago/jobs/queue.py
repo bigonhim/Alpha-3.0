@@ -114,7 +114,10 @@ class JobQueue:
             self.version += 1
             handler = self._handlers.get(kind)
             ctx = JobContext(jid, self)
+            from ..engine.audit import ACTOR
+            token = ACTOR.set("you (confirmed)" if params.get("confirmed") else f"job:{kind}")
             task = asyncio.create_task(handler(ctx, params), name=kind)  # type: ignore[misc]
+            ACTOR.reset(token)
             self._running[jid] = task
             status, error, message = "done", None, None
             try:

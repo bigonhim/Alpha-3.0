@@ -13,7 +13,7 @@ It is a local, single-user app. Your BRAIN password and LLM API keys are kept in
 **Requirements**
 
 - Windows 10/11 with the Microsoft Edge WebView2 runtime (preinstalled on current Windows).
-- Python 3.12 or newer. It was built and tested on 3.13.
+- Python 3.11 or newer (as `pyproject.toml` requires). It was built and tested on 3.13.
 
 ```powershell
 cd AlphaGo
@@ -21,7 +21,12 @@ python -m venv .venv
 .venv\Scripts\python.exe -m pip install -e .[dev]
 .venv\Scripts\python.exe -m alphago            # native window
 .venv\Scripts\python.exe -m alphago --web      # same app in your browser at http://127.0.0.1:8090
+.venv\Scripts\python.exe -m alphago --headless # the engine without a window (UI at http://127.0.0.1:8090)
 ```
+
+- The UI listens on 127.0.0.1 only. To open it from another PC, add `--host 0.0.0.0 --token <secret>`, then open `http://<pc>:8090/?token=<secret>` once. The app refuses to listen on another address without a token.
+- Only one AlphaGo engine runs per PC (window, browser or background), so the same quota is never spent twice.
+- **Sync with BRAIN → Run in the background → Start with Windows** registers a Task Scheduler entry that starts `--headless` at logon, as you, so it can read your keys. While simulations are queued or running, the PC is kept awake (`service.keep_awake`).
 
 **Build a standalone .exe** (no Python needed on the target PC):
 
@@ -85,8 +90,11 @@ python -m venv .venv
 | **Alphas** | Every alpha, from the app or synced. Double-click for details: metrics, check badges, PnL and yearly charts, self-correlation, optimise, properties and AI description, `/check`, and **Submit…**. |
 | **Research History** | Autopilot runs and the idea journal (hypothesis → verdict). Failed shapes become the AI's "don't repeat" memory. |
 | **Analytics** | Simulations per day, success rate, Sharpe distribution, most frequent failing checks, yield by generator and dataset, and LLM usage. |
-| **LLM Integration** | Active provider (Gemini, Claude, OpenAI / compatible, Ollama), its key or server, models per role, thinking level, call budget, rate-limit status, and the prompt-template editor with reset. |
-| **Sync with BRAIN** | Login (including Persona), allowed settings, and catalogue, alphas and programs syncs, with last-synced times. |
+| **Quota Planner** | What 100 simulations have bought so far, per dataset and strategy: promising, strong, *passed BRAIN's check* and submitted per 100, with 80% ranges. Suggests a split of a quota (most where submittable alphas came from, 20% exploring) and can create the research tasks as *planned*, waiting for your approval. |
+| **Health** | Per AI provider and day: calls, rate limits, timeouts, unavailable models, server errors, latency, tokens; per model error rates; BRAIN throttles (429), concurrency rejections, 5xx and network errors, quota used; **which repairs work** per failing check; how close the self-correlation estimate has been to BRAIN. |
+| **Audit Log** | Every action the app took on your BRAIN account (simulations sent, checks, submissions, property/tag/Osmosis changes, sign-ins), who triggered it (you, a confirmed job, task N, Autopilot) and how many simulations it spent. Filters and CSV export; append-only. |
+| **LLM Integration** | Active provider (Gemini, Claude, OpenAI / compatible, Ollama), its key or server, models per role, thinking level, call budget, rate-limit status, **fallback providers**, the **AI self-check** switch, the **model tournament** (scoreboard, lock the winner) and the prompt-template editor with **versions** (results per version, diff, restore). |
+| **Sync with BRAIN** | Login (including Persona), allowed settings, and catalogue, alphas and programs syncs, with last-synced times. **Email alerts** (SMTP) and **Run in the background** (Start with Windows, keep awake). |
 
 **Verdicts used throughout**
 
@@ -95,11 +103,20 @@ python -m venv .venv
 | `rejected` | Error, or far below the Sharpe limit. |
 | `weak` | Below the bar for further work. |
 | `promising` | At least 70% of the Sharpe limit, with failures that can be fixed. |
-| `strong` | All in-sample checks pass, correlation not yet checked. |
-| `ready` | BRAIN's `/check` passes, correlation included. |
+| `strong` | All in-sample checks pass, correlation not yet checked (or a pass went stale: you submitted another alpha in that region/delay since, so it needs a fresh check). |
+| `ready` | BRAIN's `/check` passes, correlation included. A **fragile** badge means AlphaGo's own robustness test failed (neighbouring settings keep under 80% of the Sharpe); BRAIN would still accept it — you decide. |
 | `submitted` | Already submitted. |
 
-Limits always come from BRAIN's own check results. The app's built-in thresholds are only a fallback.
+Limits always come from BRAIN's own check results. The app's built-in thresholds are only a fallback, and the limits BRAIN last reported for your account are given to the AI.
+
+**How a near miss becomes ready** (research tasks and AI batches)
+
+1. **Repair loop.** For each near miss the app reads which checks fail and by how much (value against BRAIN's limit), picks fixes aimed at those checks and simulates them together. Children that closed the gap they aimed at are repaired again, stacking fixes, for up to `research.repair_depth` rounds. Fixes are ordered by how often each one has actually worked on that check before (Health → Which repairs work). Repairs use `research.optimize_share` (20%) of a task's simulations and run after every wave.
+2. **BRAIN check on every strong alpha** (up to `research.check_cap`, 15 per task; a check costs no simulations), most different first: lowest estimated self-correlation (from daily PnL against your submitted alphas) and no two near-identical PnL twins in a row.
+3. **After a pass:** robustness test (3 simulations; a badge, not a demotion), walk-forward (recent 20% of in-sample ÷ the first 80%), a search-adjusted (deflated) Sharpe from how many ideas the search tried, and — once 20 of your submitted alphas have BRAIN OS numbers — a predicted OS/IS ratio. All advisory.
+4. **A correlation failure** gets one decorrelation round aimed at the alpha it collides with.
+
+Before simulating, generated ideas that copy a submitted alpha's shape and fields are left out, each economic idea (momentum, reversal, value, …) is capped per day at `research.cluster_share` of the simulations, and the AI critiques its own batch (`llm.self_check`).
 
 ---
 
@@ -125,6 +142,7 @@ Practitioner data (about 830 simulations per live alpha) shows that **correlatio
   - Full Autopilot is behind a warning you must accept.
   - Please read the current Do's and Don'ts on the platform. Which mode you run is your decision.
 - **Credentials.** They are stored only in Windows Credential Manager and are never written to logs or the database.
+- **Accountability.** Every action on your BRAIN account is in the **Audit Log**. Email alerts carry alpha IDs and counts only, never expressions or credentials, and are off until you switch them on.
 
 ---
 

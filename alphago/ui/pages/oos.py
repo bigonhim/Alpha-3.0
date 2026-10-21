@@ -141,3 +141,33 @@ async def page() -> None:
                 notify_error(exc)
 
         ui.button("Before/after pool performance (selected)", icon="compare", on_click=before_after).props("flat")
+
+    with ui.expansion("What predicts a gap in your alphas", icon="insights").classes("w-full"):
+        from ...engine.honesty import fit_gap_model, gap_summary
+        gap_box = ui.column().classes("w-full gap-2")
+
+        async def show_gap(refit: bool = False) -> None:
+            if refit:
+                await fit_gap_model()
+            g = await gap_summary()
+            gap_box.clear()
+            with gap_box:
+                ui.label("A ridge regression on your submitted alphas that BRAIN reports out-of-sample Sharpe for: "
+                         "which formula features came with a fall from in-sample to out-of-sample Sharpe. New "
+                         "alphas get a predicted OS/IS ratio, used to order BRAIN checks. It only describes your "
+                         "own history; with few alphas it is noisy.").classes("ag-muted text-sm")
+                m = g["model"]
+                if not m.get("ready"):
+                    ui.label(f"Not enough data yet: {g['n_with_os']} submitted alpha(s) with BRAIN OS Sharpe, "
+                             f"{g['needed']} needed.").classes("ag-warn-box text-sm w-full")
+                    return
+                ui.label(f"Fitted on {m['n']} alphas · in-sample R² {m.get('r2')} · average OS/IS "
+                         f"{m['intercept']:.2f}").classes("text-sm")
+                ui.table(columns=[{"name": "label", "label": "Feature", "field": "label", "align": "left"},
+                                  {"name": "effect", "label": "Effect (std.)", "field": "effect"},
+                                  {"name": "reading", "label": "In your alphas it…", "field": "reading",
+                                   "align": "left"}],
+                         rows=g["explain"]).props("dense flat").classes("w-full")
+
+        ui.button("Refit now", icon="refresh", on_click=lambda: show_gap(True)).props("flat")
+        await show_gap()

@@ -184,6 +184,8 @@ async def test_llm_ideas_chunks_by_ideas_per_call(tmp_path, monkeypatch):
     counter = itertools.count(2)
 
     async def fake_generate_json(prompt, schema, **kw):
+        if kw.get("purpose") == "self_check":      # the batch critique keeps every idea here
+            return schema(reviews=[])
         k = int(prompt.split("Propose ")[1].split()[0]) if "Propose " in prompt else 0
         calls.append(k)
         ideas = [AlphaIdea(expression=f"rank(ts_mean(close, {next(counter)}))", idea="i", mechanism="momentum",

@@ -20,8 +20,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import random
 from collections import Counter
+from dataclasses import replace
 from datetime import datetime, timezone
 from typing import Any
 
@@ -34,10 +36,11 @@ from ..config import settings
 from ..db import db
 from ..db.models import Alpha, Candidate, Dataset, DatasetRating, ResearchTask
 from ..events import bus
+from ..llm import llm
 from ..knowledge.templates import (PV_PARTNERS, enumerate_group, enumerate_pairs, enumerate_single, second_order,
                                    settings_for_category)
-from . import actions
 from .generators import dataset_fields
+from .refine import RefineContext, certify, refine, repair_spent
 from .simulator import CandidateSpec, simulator
 from .stats import brain_day_start
 
@@ -48,6 +51,7 @@ STAGES = ["analyzing", "generating", "simulating", "optimizing", "completed"]
 ACTIVE = ("queued", "running")
 FINISHED = ("complete", "stopped", "skipped", "failed")
 HISTORY_CAP = 3          # skip skeletons this market has already simulated this many times
+ROBUST_RESERVE = 3       # repair rounds leave room in the repair budget for one robustness test (3 simulations)
 
 
 def utcnow() -> datetime:
@@ -212,6 +216,8 @@ class ResearchManager:
     # ------------------------------------------------------------ runner
 
     async def _run(self, task_id: int) -> None:
+        from .audit import ACTOR
+        ACTOR.set(f"task:{task_id}")
         try:
             await self._run_inner(task_id)
         except asyncio.CancelledError:
@@ -258,7 +264,7 @@ class ResearchManager:
             if not ids:
                 return []
             return list(await s.scalars(select(Alpha).where(Alpha.id.in_(ids), Alpha.verdict.in_(verdicts))
-                                        .order_by(Alpha.sharpe.desc().nulls_last()).limit(limit)))
+                                        .order_by(Alpha.score.desc().nulls_last()).limit(limit)))
 
     def _expressions(self, t: ResearchTask, fields: dict[str, list[tuple[str, str]]]):  # noqa: ANN202
         ds = t.dataset_ids or []
@@ -306,10 +312,20 @@ class ResearchManager:
         exhausted = False
         await self._set(task_id, stage="generating")
 
-        # ---------------- waves of first-pass expressions
+        # ---------------- budget: first-pass simulations + a share reserved for repairing near misses
+        r = settings.research
+        repair_budget = int(round(t.planned_sims * max(0.0, min(0.9, r.optimize_share))))
+        first_budget = t.planned_sims - repair_budget
+        ctx = RefineContext(task_id=task_id, use_llm=llm.configure(), max_depth=r.repair_depth,
+                            allowance=lambda: self._repair_allowance(t, repair_budget))
+
+        async def repair_only() -> int:
+            return await self._repair_allowance(t, repair_budget) - ROBUST_RESERVE
+
+        # ---------------- waves of first-pass expressions, each followed by repairs and BRAIN checks
         while True:
             c = await self._counts(task_id)
-            remaining = t.planned_sims - c["sent"]
+            remaining = first_budget - c["sent"]
             if remaining <= 0 or exhausted:
                 break
             if t.source == "autopilot":
@@ -338,7 +354,8 @@ class ResearchManager:
             if not specs:
                 break
             generated += len(specs)
-            res = await simulator.prepare(specs, initial_status="approved", task_id=task_id, history_cap=HISTORY_CAP)
+            res = await simulator.prepare(specs, initial_status="approved", task_id=task_id, history_cap=HISTORY_CAP,
+                                          cluster_cap=t.source != "manual")
             for k, v in res.left_out.items():
                 left_out[k] += v
             ids = [x.id for x in res.created]
@@ -346,11 +363,12 @@ class ResearchManager:
             await self._refresh(task_id, left_out, generated, stage="simulating")
             await simulator.wait_for(ids)
             await self._refresh(task_id, left_out, generated)
+            await self._repair_wave(t, ids, ctx, repair_budget, first_budget, left_out, generated)
 
         # ---------------- Search Lab: group / event variants of the best first-order results
         if t.kind == "single":
             c = await self._counts(task_id)
-            budget = t.planned_sims - c["sent"]
+            budget = first_budget - c["sent"]
             best = await self._top(task_id, ("promising", "strong", "ready"), 8)
             if budget > 0 and best:
                 specs = []
@@ -365,42 +383,85 @@ class ResearchManager:
                                                        rationale={"family": family}))
                 if specs:
                     generated += len(specs)
-                    res = await simulator.prepare(specs, initial_status="approved", task_id=task_id)
+                    res = await simulator.prepare(specs, initial_status="approved", task_id=task_id,
+                                                  cluster_cap=t.source != "manual")
                     for k, v in res.left_out.items():
                         left_out[k] += v
                     ids = [x.id for x in res.created]
                     await simulator.enqueue(ids)
                     await simulator.wait_for(ids)
+                    await self._repair_wave(t, ids, ctx, repair_budget, first_budget, left_out, generated)
 
-        # ---------------- optimise near misses, check strong alphas, robustness
+        # ---------------- what is left of the repair budget, then BRAIN checks on every strong alpha
         await self._refresh(task_id, left_out, generated, stage="optimizing")
-        from ..llm import llm
-        from .optimizer import optimize_alpha
-        near = await self._top(task_id, ("promising",), 3)
-        opt_ids: list[int] = []
-        for a in near:
-            try:
-                opt_ids += await optimize_alpha(a.id, use_llm=llm.configure(), task_id=task_id)
-            except Exception as exc:
-                log.warning("optimise %s failed: %s", a.id, exc)
-        if opt_ids:
-            await simulator.wait_for(opt_ids)
-        from .autopilot import check_robustness
-        for a in await self._top(task_id, ("strong",), 3):
-            try:
-                state, _ = await actions.run_check(a.id)
-                if state == "pass" and settings.research.robustness_gate:
-                    await check_robustness(a.id, None, task_id=task_id)
-            except Exception as exc:
-                bus.publish("check", f"Check failed for {a.id}: {getattr(exc, 'message', exc)}", "warning")
+        seeds = await self._seeds(task_id, None, 3)
+        if seeds and await ctx.budget() > ROBUST_RESERVE:
+            await refine(seeds, replace(ctx, allowance=repair_only))
+        strong = [a.id for a in await self._top(task_id, ("strong",), 500)]
+        await certify(strong, ctx, cap=max(0, r.check_cap - await self._checks_done(task_id)))
         c = await self._refresh(task_id, left_out, generated, stage="completed")
         await self._set(task_id, status="complete", finished_at=utcnow(),
-                        message=f"Done: {c['n_simulated']} simulated, {c['n_optimized']} optimised, {c['n_strong']} "
-                                f"strong, {c['n_ready']} ready for manual submission.")
+                        message=f"Done: {c['n_simulated']} simulated, {c['n_optimized']} repaired, {c['n_strong']} "
+                                f"strong, {c['n_ready']} passed BRAIN's check (ready for your manual submission).")
         bus.publish("autopilot" if t.source != "manual" else "simulate",
                     f"Research task #{task_id} complete: {c['n_simulated']} simulated, {c['n_strong']} strong, "
                     f"{c['n_ready']} ready" + (f", best Sharpe {c['best_sharpe']:.2f}" if c["best_sharpe"] else "")
-                    + ".", "success" if c["n_ready"] or c["n_strong"] else "info")
+                    + ".", "success" if c["n_ready"] or c["n_strong"] else "info", task_id=task_id,
+                    kind="task_finished")
+
+    async def _repair_allowance(self, t: ResearchTask, repair_budget: int) -> int:
+        """Repair simulations the task may still spend: its reserved share, and the daily Autopilot cap."""
+        left = repair_budget - await repair_spent(t.id)
+        if t.source == "autopilot":
+            left = min(left, settings.research.autopilot_daily_cap - await autopilot_sims_today())
+        return left
+
+    async def _seeds(self, task_id: int, candidate_ids: list[int] | None, limit: int) -> list[Alpha]:
+        """Near misses worth repairing: promising, never expanded, not already failed by BRAIN's check — best score
+        first (the score credits sign-flip candidates; raw Sharpe would rank them last)."""
+        async with db.session() as s:
+            stmt = select(Candidate.alpha_id).where(Candidate.task_id == task_id, Candidate.alpha_id.is_not(None))
+            if candidate_ids is not None:
+                stmt = stmt.where(Candidate.id.in_(candidate_ids or [-1]))
+            ids = list(await s.scalars(stmt))
+            if not ids:
+                return []
+            return list(await s.scalars(select(Alpha).where(
+                Alpha.id.in_(ids), Alpha.verdict == "promising", Alpha.expanded_at.is_(None),
+                (Alpha.check_state.is_(None)) | (Alpha.check_state != "fail"))
+                .order_by(Alpha.score.desc().nulls_last()).limit(limit)))
+
+    async def _checks_done(self, task_id: int) -> int:
+        async with db.session() as s:
+            ids = list(await s.scalars(select(Candidate.alpha_id).where(Candidate.task_id == task_id,
+                                                                        Candidate.alpha_id.is_not(None))))
+            if not ids:
+                return 0
+            return await s.scalar(select(func.count(Alpha.id)).where(Alpha.id.in_(ids),
+                                                                     Alpha.checked_at.is_not(None))) or 0
+
+    async def _repair_wave(self, t: ResearchTask, candidate_ids: list[int], ctx: RefineContext, repair_budget: int,
+                           first_budget: int, left_out: Counter, generated: int) -> None:
+        """After a wave: repair its best near misses (a slice of the repair budget proportional to the wave) and
+        run BRAIN's check on its strong alphas, so good alphas surface while the task is still running."""
+        if not candidate_ids:
+            return
+        seeds = await self._seeds(t.id, candidate_ids, 2)
+        if seeds and repair_budget > 0:
+            wave_cap = max(12, math.ceil(repair_budget * len(candidate_ids) / max(1, first_budget) * 1.5))
+            start = await repair_spent(t.id)
+
+            async def wave_allowance() -> int:
+                return min(await self._repair_allowance(t, repair_budget) - ROBUST_RESERVE,
+                           wave_cap - (await repair_spent(t.id) - start))
+
+            await self._refresh(t.id, left_out, generated, stage="optimizing")
+            await refine(seeds, replace(ctx, allowance=wave_allowance))
+        strong = [a.id for a in await self._top(t.id, ("strong",), 200)]
+        cap = settings.research.check_cap - await self._checks_done(t.id)
+        if strong and cap > 0:
+            await certify(strong, ctx, cap=cap)
+        await self._refresh(t.id, left_out, generated, stage="simulating")
 
     # ------------------------------------------------------------ planning
 
@@ -438,7 +499,6 @@ class ResearchManager:
             why = f"{focus} has the fewest strong alphas so far ({strong.get(focus, 0)}); new themes break correlation."
         pool = [x for x in rows if x["theme"] == focus] or rows
         plan = None
-        from ..llm import llm
         if llm.configure() and any(x["rated"] for x in rows):
             try:
                 plan = await self._ai_plan(region, delay, universe, focus, strong, pool + [x for x in rows
@@ -465,7 +525,6 @@ class ResearchManager:
 
     async def _ai_plan(self, region: str, delay: int, universe: str, focus: str, strong: dict[str, int],
                        pool: list[dict[str, Any]]) -> dict[str, Any] | None:
-        from ..llm import llm
         from ..llm.prompts import render
         from ..llm.schemas import ResearchPlan
         lines = "\n".join(f"- {x['id']} · {x['theme']} · AI {x['ai_score']} · {x['single']}/{x['double']}/"
@@ -523,6 +582,8 @@ research = ResearchManager()
 
 async def daily_scheduler() -> None:
     """Runs in the background: after each BRAIN quota reset, plan the day's research if the user turned it on."""
+    from .audit import ACTOR
+    ACTOR.set("autopilot")
     await asyncio.sleep(20)
     while True:
         try:

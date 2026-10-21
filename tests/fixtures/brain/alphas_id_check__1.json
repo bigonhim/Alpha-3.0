@@ -1,0 +1,63 @@
+{
+ "method": "GET",
+ "shape": "/alphas/{id}/check",
+ "path": "/alphas/Kq7mP2x/check",
+ "status": 200,
+ "retry_after": null,
+ "json": {
+  "is": {
+   "checks": [
+    {
+     "name": "LOW_SHARPE",
+     "result": "PASS",
+     "limit": 1.25,
+     "value": 1.61
+    },
+    {
+     "name": "LOW_FITNESS",
+     "result": "PASS",
+     "limit": 1.0,
+     "value": 1.27
+    },
+    {
+     "name": "LOW_TURNOVER",
+     "result": "PASS",
+     "limit": 0.01,
+     "value": 0.1312
+    },
+    {
+     "name": "HIGH_TURNOVER",
+     "result": "PASS",
+     "limit": 0.7,
+     "value": 0.1312
+    },
+    {
+     "name": "CONCENTRATED_WEIGHT",
+     "result": "PASS"
+    },
+    {
+     "name": "MATCHES_COMPETITION",
+     "result": "PASS"
+    },
+    {
+     "name": "SELF_CORRELATION",
+     "result": "PASS",
+     "limit": 0.7,
+     "value": 0.4122
+    },
+    {
+     "name": "PROD_CORRELATION",
+     "result": "PASS",
+     "limit": 0.7,
+     "value": 0.5031
+    },
+    {
+     "name": "POWER_POOL_CORRELATION",
+     "result": "FAIL",
+     "limit": 0.5,
+     "value": 0.6
+    }
+   ]
+  }
+ }
+}
