@@ -66,7 +66,7 @@ def _split_counts(pairs) -> dict[str, int]:  # noqa: ANN001
 
 
 # repair, robustness and probe simulations are not new ideas: they neither count as tries nor as successes of their own
-NOT_FIRST_PASS = ("optimize", "robustness", "probe")
+NOT_FIRST_PASS = ("optimize", "robustness", "probe", "seed")
 
 
 def survival_weight(verdict: str | None, robust_state: str | None = None) -> float:

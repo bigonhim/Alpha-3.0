@@ -37,13 +37,14 @@ def is_checks(sharpe: float, fitness: float, turnover: float) -> list[dict[str, 
 
 class FakeBrain:
     def __init__(self, score: Score, *, self_corr: float = 0.3, quota: int = 5000, polls: int = 1,
-                 throttle_posts: int = 0) -> None:
+                 throttle_posts: int = 0, check_replies: list[str] | None = None) -> None:
         self.score = score
         self.self_corr = self_corr
         self.remaining = quota
         self.limit = quota
         self.polls = polls                       # progress answers before a simulation completes
         self.throttle_posts = throttle_posts     # first N POST /simulations answer 429 (concurrency)
+        self.check_replies = list(check_replies or [])   # first answers of /check: "pending", "error" or "empty"
         self.ids = itertools.count(1)
         self.sims: dict[str, dict[str, Any]] = {}
         self.alphas: dict[str, dict[str, Any]] = {}
@@ -113,10 +114,17 @@ class FakeBrain:
         if aid not in self.checked:
             self.checked.append(aid)
             return httpx.Response(200, headers={"Retry-After": "1"})
+        reply = self.check_replies.pop(0) if self.check_replies else "done"
+        if reply == "empty":
+            return httpx.Response(200, json={})
         checks = [c for c in a["is"]["checks"] if c["name"] != "SELF_CORRELATION"] + [
             {"name": "SELF_CORRELATION", "result": "PASS" if self.self_corr < 0.7 else "FAIL", "limit": 0.7,
              "value": self.self_corr},
             {"name": "PROD_CORRELATION", "result": "PASS", "limit": 0.7, "value": 0.4}]
+        if reply in ("pending", "error"):
+            word = reply.upper()
+            checks = [c for c in checks if c["name"] != "SELF_CORRELATION"] + [{"name": "SELF_CORRELATION",
+                                                                                "result": word}]
         return httpx.Response(200, json={"is": {"checks": checks}})
 
     def pnl(self, request: httpx.Request) -> httpx.Response:

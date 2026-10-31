@@ -142,6 +142,34 @@ async def page() -> None:
             await jobs.submit("check_many", f"Check {len(ids)} alphas", {"alpha_ids": ids})
             ui.notify(f"Queued checks for {len(ids)} alphas (see Tasks).")
 
+        async def check_all_strong() -> None:
+            async with db.session() as s:
+                ids = list(await s.scalars(select(Alpha.id).where(
+                    Alpha.verdict == "strong", Alpha.type == "REGULAR",
+                    or_(Alpha.check_state.is_(None), Alpha.check_state.in_(["pending", "stale", "none", ""])))))
+            if not ids:
+                ui.notify("Every strong alpha already has BRAIN's answer.", type="info")
+                return
+            await jobs.submit("check_many", f"Check {len(ids)} strong alphas", {"alpha_ids": ids})
+            ui.notify(f"Queued BRAIN's check for {len(ids)} strong alpha(s), including synced ones (see Tasks). "
+                      "It costs no simulations.")
+
+        async def repair_selected() -> None:
+            from .tasks import repair_dialog
+            ids = await selected_ids()
+            if not ids:
+                ui.notify("Select alphas first (checkbox column).", type="warning")
+                return
+            async with db.session() as s:
+                rows = list(await s.scalars(select(Alpha).where(Alpha.id.in_(ids))))
+            first = rows[0]
+            same = [a.id for a in rows if (a.region, a.delay, a.universe) == (first.region, first.delay, first.universe)]
+            if len(same) < len(rows):
+                ui.notify(f"A repair task runs in one scope: taking the {len(same)} alpha(s) in {first.region} "
+                          f"D{first.delay} {first.universe}.", type="warning")
+            await repair_dialog(alpha_ids=same, scope={"region": first.region, "delay": first.delay,
+                                                       "universe": first.universe})
+
         async def refresh_selected() -> None:
             ids = await selected_ids()
             if ids:
@@ -161,6 +189,8 @@ async def page() -> None:
         with ui.row().classes("gap-2"):
             ui.button("Refresh list", icon="refresh", on_click=reload).props("flat")
             ui.button("Run submission check on selected", icon="rule", on_click=check_selected).props("flat")
+            ui.button("Check all strong", icon="fact_check", on_click=check_all_strong).props("flat")
+            ui.button("Repair selected…", icon="healing", on_click=repair_selected).props("flat")
             ui.button("Re-fetch selected from BRAIN", icon="cloud_sync", on_click=refresh_selected).props("flat")
             ui.button("Export CSV", icon="download", on_click=export_csv).props("flat")
             ui.label("Tip: double-click a row (or click the Alpha id) to open details, check and submit.").classes(

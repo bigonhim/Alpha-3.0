@@ -8,8 +8,10 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-# informational checks that never block submission readiness
-NON_BLOCKING = {"MATCHES_PYRAMID", "MATCHES_THEMES", "MATCHES_COMPETITION", "POWER_POOL_CORRELATION"}
+# informational checks that never block submission readiness; the *_SUBMISSION checks describe the account's daily
+# limit, not the alpha (the names are community-reported; submit_alpha enforces the limit itself)
+NON_BLOCKING = {"MATCHES_PYRAMID", "MATCHES_THEMES", "MATCHES_COMPETITION", "POWER_POOL_CORRELATION",
+                "REGULAR_SUBMISSION", "SUPER_SUBMISSION"}
 CORRELATION_CHECKS = {"SELF_CORRELATION", "PROD_CORRELATION"}
 
 FALLBACK_LIMITS = {
@@ -46,18 +48,22 @@ def check_map(checks: list[dict[str, Any]] | None) -> dict[str, dict[str, Any]]:
 
 
 def blocking_failures(checks: list[dict[str, Any]] | None) -> list[str]:
-    """Names of FAIL/ERROR checks that block submission (the one rule shared by the evaluator and /check)."""
+    """Names of FAIL checks that block submission (the one rule shared by the evaluator and /check). An ERROR means
+    BRAIN could not work the check out, not that the alpha failed it: it stays unresolved (`pending_checks`)."""
     return [str(c.get("name")) for c in checks or []
-            if str(c.get("result", "")).upper() in ("FAIL", "ERROR") and str(c.get("name")) not in NON_BLOCKING]
+            if str(c.get("result", "")).upper() == "FAIL" and str(c.get("name")) not in NON_BLOCKING]
 
 
 def pending_checks(checks: list[dict[str, Any]] | None) -> list[str]:
+    """Checks without an answer yet: PENDING, or ERROR (ask again)."""
     return [str(c.get("name")) for c in checks or []
-            if str(c.get("result", "")).upper() == "PENDING" and str(c.get("name")) not in NON_BLOCKING]
+            if str(c.get("result", "")).upper() in ("PENDING", "ERROR") and str(c.get("name")) not in NON_BLOCKING]
 
 
 def check_state_of(checks: list[dict[str, Any]] | None) -> str:
-    """State of a full BRAIN /check result: fail | pending | pass."""
+    """State of a full BRAIN /check result: fail | pending | pass. No checks at all is no answer, never a pass."""
+    if not checks:
+        return "pending"
     return "fail" if blocking_failures(checks) else ("pending" if pending_checks(checks) else "pass")
 
 
@@ -75,6 +81,23 @@ def limits_for(checks: list[dict[str, Any]] | None, delay: int | None) -> tuple[
     sharpe_lim = _f((cm.get("LOW_SHARPE") or {}).get("limit")) or fb_sharpe
     fitness_lim = _f((cm.get("LOW_FITNESS") or {}).get("limit")) or fb_fitness
     return sharpe_lim, fitness_lim
+
+
+def headline_failures(sharpe: float | None, fitness: float | None, turnover: float | None,
+                      checks: list[dict[str, Any]] | None, sharpe_lim: float, fitness_lim: float) -> list[str]:
+    """Headline tests BRAIN gave no answer on (check missing or ERROR): the numbers decide, so an alpha with Sharpe 0.2
+    and an empty or broken check list cannot pass for strong."""
+    cm = check_map(checks)
+    out = []
+    for name, value, limit, low_side in (("LOW_SHARPE", sharpe, sharpe_lim, True),
+                                         ("LOW_FITNESS", fitness, fitness_lim, True),
+                                         ("LOW_TURNOVER", turnover, 0.01, True),
+                                         ("HIGH_TURNOVER", turnover, 0.7, False)):
+        result = str((cm.get(name) or {}).get("result", "ERROR")).upper()
+        limit = _f((cm.get(name) or {}).get("limit")) or limit
+        if result == "ERROR" and value is not None and (value < limit if low_side else value > limit):
+            out.append(name)
+    return out
 
 
 def evaluate(
@@ -101,12 +124,13 @@ def evaluate(
         result = str(c.get("result", "")).upper()
         if name in NON_BLOCKING:
             continue
-        if result in ("FAIL", "ERROR"):
+        if result == "FAIL":
             failing.append(name)
-        elif result == "PENDING":
+        elif result in ("PENDING", "ERROR"):
             pending.append(name)
         elif result == "WARNING":
             warnings.append(name)
+    failing += headline_failures(sharpe_v, fitness_v, turnover_v, checks, sharpe_lim, fitness_lim)
 
     ratio = sharpe_v / sharpe_lim if sharpe_lim else 0.0
     fit_ratio = (fitness_v or 0.0) / fitness_lim if fitness_lim else 0.0

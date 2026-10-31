@@ -96,6 +96,35 @@ def settings_line(settings: dict[str, Any] | None) -> str:
     return " · ".join(f"{k}={s[k]}" for k in keys if k in s)
 
 
+async def repair_block(a: Alpha) -> None:
+    """What the repair engine sees in this alpha: why each check fails, the moves it would run next, what was tried."""
+    from ..engine.refine import repair_plan, tried_lines
+    if (a.type or "REGULAR") != "REGULAR" or not a.code or a.verdict in ("ready", "submitted"):
+        return
+    plan = repair_plan(a)
+    tried = await tried_lines(a.id, 6)
+    if not (plan["lines"] or plan["moves"] or tried):
+        return
+    with ui.expansion("Repair plan", icon="healing", value=a.verdict in ("promising", "weak")).classes("w-full"):
+        if plan["state"] == "exhausted":
+            ui.label(plan["note"] or "Every move that could help has been tried.").classes("ag-amber text-sm")
+        if plan["out_of_reach"]:
+            ui.label(f"Skipped by automatic repair. {plan['out_of_reach']} Select it yourself to try anyway.").classes(
+                "ag-amber text-sm")
+        for line in plan["lines"]:
+            ui.label(line).classes("text-sm whitespace-pre-wrap")
+        if plan["correlation_only"]:
+            ui.label("Passes every metric: a repair task takes the decorrelation route.").classes("ag-cyan text-sm")
+        if plan["moves"]:
+            ui.label("Next moves").classes("ag-muted text-xs pt-1")
+            for move in plan["moves"]:
+                ui.label(f"• {move}").classes("text-sm ag-mono")
+        if tried:
+            ui.label("Tried so far").classes("ag-muted text-xs pt-1")
+            for line in tried:
+                ui.label(line).classes("text-xs ag-mono")
+
+
 async def load_alpha(alpha_id: str) -> Alpha | None:
     async with db.session() as s:
         return await s.get(Alpha, alpha_id)
@@ -239,6 +268,7 @@ async def open_alpha(alpha_id: str, on_change: Callable[[], Any] | None = None) 
         with ui.row().classes("gap-1 flex-wrap"):
             for c in a.checks or []:
                 check_badge(c)
+        await repair_block(a)
 
         chart_box = ui.column().classes("w-full")
         info = ui.label().classes("ag-muted text-xs")
@@ -309,11 +339,16 @@ async def open_alpha(alpha_id: str, on_change: Callable[[], Any] | None = None) 
             except Exception as exc:
                 notify_error(exc, "Optimise failed: ")
 
+        async def repair() -> None:
+            from .pages.tasks import repair_dialog
+            await repair_dialog(alpha_ids=[a.id], scope={"region": a.region, "delay": a.delay, "universe": a.universe})
+
         with ui.row().classes("gap-2 pt-2 flex-wrap"):
             check_btn = ui.button("Check", icon="rule", on_click=run_check)
             ui.button("Submit…", icon="send", on_click=lambda: confirm_submit(a.id, on_change)).props(
                 "color=positive" + ("" if a.status != "ACTIVE" else " disable"))
             ui.button("Optimise", icon="tune", on_click=optimize).props("flat")
+            ui.button("Repair…", icon="healing", on_click=repair).props("flat")
             pnl_btn = ui.button("PnL & yearly stats", icon="show_chart", on_click=load_pnl).props("flat")
             corr_btn = ui.button("Self-correlation", icon="hub", on_click=load_corr).props("flat")
             ui.button("Properties", icon="edit", on_click=lambda: properties_dialog(a.id)).props("flat")

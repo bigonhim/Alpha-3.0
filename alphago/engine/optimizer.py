@@ -1,6 +1,6 @@
 """Near-miss optimiser entry points: one-round repairs from the alpha page, the AI refine call and the decay rule.
 
-The fix library, the learned fix order and the multi-round repair loop live in engine/refine.py."""
+Diagnosis and moves live in engine/playbook.py, the learned order and the multi-round loop in engine/refine.py."""
 
 from __future__ import annotations
 
@@ -23,7 +23,8 @@ from .simulator import CandidateSpec
 log = logging.getLogger(__name__)
 
 def retune_decay(decay: int, turnover: float | None) -> int:
-    """machine_lib rule of thumb for turnover → decay."""
+    """machine_lib rule of thumb for turnover → decay. The repair loop solves decay instead (playbook.solve_decay);
+    this stays for anything that calls it directly."""
     t = turnover or 0
     if t > 0.7:
         return max(4, decay * 4)
@@ -49,12 +50,14 @@ def plan_variants(a: Alpha, max_variants: int = 10) -> list[tuple[str, dict[str,
     return [(v.expr, v.settings, v.detail) for v in plan_static(a, max_variants)]
 
 
-async def llm_refine(a: Alpha, k: int = 4, *, tried: list[str] | None = None,
-                     collide: str | None = None) -> list[CandidateSpec]:
+async def llm_refine(a: Alpha, k: int = 4, *, tried: list[str] | None = None, collide: str | None = None,
+                     prescription: str | None = None) -> list[CandidateSpec]:
     """k AI variants of `a` aimed at its failing checks. `tried` lists fixes already tried (and their results) so the
-    model does not repeat them; `collide` is the submitted alpha it is too correlated with."""
+    model does not repeat them; `collide` is the submitted alpha it is too correlated with; `prescription` is the
+    measured diagnosis with the numbers each check needs."""
+    from .refine import alpha_checks
     failing = [f"- {c.get('name')}: {c.get('result')} (value {c.get('value')}, limit {c.get('limit')})"
-               for c in (a.checks or []) if str(c.get("result", "")).upper() in ("FAIL", "WARNING", "ERROR")]
+               for c in alpha_checks(a) if str(c.get("result", "")).upper() in ("FAIL", "WARNING", "ERROR")]
     yearly = await db.kv_get(f"yearly:{a.id}") or []
     yearly_txt = "\n".join(str(r) for r in yearly[-6:])
     s = normalize_settings(a.settings or {})
@@ -66,7 +69,7 @@ async def llm_refine(a: Alpha, k: int = 4, *, tried: list[str] | None = None,
                           fitness=a.fitness, turnover=a.turnover, returns=a.returns, drawdown=a.drawdown,
                           margin=a.margin, failing="\n".join(failing) or "- none (improve robustness)",
                           tried="\n".join(tried or []), collide=collide or "", yearly=yearly_txt,
-                          dataset_context=ds_ctx)
+                          dataset_context=ds_ctx, prescription=prescription or "")
     batch = await llm.generate_json(prompt, IdeaBatch, system=await pack.static_prefix(s["region"], s["delay"]),
                                     role="refine", purpose="refine")
     catalog = await get_catalog(s["region"], s["delay"], s["universe"])

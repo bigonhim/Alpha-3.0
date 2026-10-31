@@ -5,6 +5,9 @@ Kinds
                the best results.
 - pair         "Double dataset · Pair": two-field templates combining a field of dataset A with one of dataset B.
 - interaction  field × field templates inside one dataset, plus each field against price/volume.
+- repair       "Repair near misses": no new ideas. BRAIN's check on strong alphas you already have, then targeted
+               repairs of the near misses in scope, closest to passing first, until its budget ends. Runs only when
+               you start it; the Autopilot never plans it.
 
 A task runs in waves: generate → validate / de-duplicate (skipping shapes this market has already answered) →
 simulate on its cores → optimise near misses → BRAIN submission check on strong alphas → robustness gate.
@@ -31,7 +34,7 @@ from sqlalchemy import func, select, update
 
 from ..brain import brain
 from ..brain.quota import eastern_day
-from ..brain.simulations import normalize_settings
+from ..brain.simulations import normalize_settings, settings_hash
 from ..config import settings
 from ..db import db
 from ..db.models import Alpha, Candidate, Dataset, DatasetRating, ResearchTask
@@ -40,18 +43,21 @@ from ..llm import llm
 from ..knowledge.templates import (PV_PARTNERS, enumerate_group, enumerate_pairs, enumerate_single, second_order,
                                    settings_for_category)
 from .generators import dataset_fields
-from .refine import RefineContext, certify, refine, repair_spent
+from .evaluator import CORRELATION_CHECKS, blocking_failures
+from .refine import RefineContext, best_first, certify, closest_first, refine, repair_spent
 from .simulator import CandidateSpec, simulator
 from .stats import brain_day_start
 
 log = logging.getLogger(__name__)
 
-KINDS = {"single": "Search Lab", "pair": "Double dataset · Pair", "interaction": "Interaction"}
+SEARCH_KINDS = {"single": "Search Lab", "pair": "Double dataset · Pair", "interaction": "Interaction"}
+KINDS = {**SEARCH_KINDS, "repair": "Repair near misses"}
 STAGES = ["analyzing", "generating", "simulating", "optimizing", "completed"]
 ACTIVE = ("queued", "running")
 FINISHED = ("complete", "stopped", "skipped", "failed")
 HISTORY_CAP = 3          # skip skeletons this market has already simulated this many times
 ROBUST_RESERVE = 3       # repair rounds leave room in the repair budget for one robustness test (3 simulations)
+REPAIR_POOL = 200        # near misses one repair task takes on, nearest to passing first
 
 
 def utcnow() -> datetime:
@@ -59,6 +65,9 @@ def utcnow() -> datetime:
 
 
 def task_label(t: ResearchTask) -> str:
+    if t.kind == "repair":
+        picked = f" · {len(t.alpha_ids)} selected" if t.alpha_ids else ""
+        return f"{KINDS['repair']} · {t.region} D{t.delay}{picked}"
     n = len(t.dataset_ids or [])
     return f"{KINDS.get(t.kind, t.kind)} · {t.region} D{t.delay} · {n} dataset{'s' if n != 1 else ''}"
 
@@ -108,25 +117,27 @@ class ResearchManager:
     async def create(self, *, kind: str, region: str, delay: int, universe: str, dataset_ids: list[str],
                      planned_sims: int | None = None, cores: int | None = None, source: str = "manual",
                      reason: str = "", theme: str | None = None, status: str = "queued",
-                     plan_day: str | None = None) -> int:
+                     plan_day: str | None = None, alpha_ids: list[str] | None = None) -> int:
         if kind not in KINDS:
             raise ValueError(f"unknown task kind {kind}")
-        need = 2 if kind == "pair" else 1
+        need = 0 if kind == "repair" else 2 if kind == "pair" else 1
         if len(dataset_ids) < need:
             raise ValueError(f"{KINDS[kind]} needs {need} dataset(s)")
         r = settings.research
+        planned_sims = planned_sims or (r.repair_task_sims if kind == "repair" else r.task_sims)
         async with db.write() as s:
             t = ResearchTask(kind=kind, source=source, region=region, delay=int(delay), universe=universe,
-                             dataset_ids=list(dataset_ids)[:need], theme=theme, reason=reason,
-                             planned_sims=int(planned_sims or r.task_sims), cores=int(cores or r.task_cores),
+                             dataset_ids=list(dataset_ids)[:need], alpha_ids=list(alpha_ids) if alpha_ids else None,
+                             theme=theme, reason=reason, planned_sims=int(planned_sims),
+                             cores=int(cores or r.task_cores),
                              status=status, plan_day=plan_day or eastern_day(), stage=None)
             s.add(t)
             await s.flush()
             tid = t.id
         self.version += 1
         bus.publish("autopilot" if source != "manual" else "simulate",
-                    f"Research task #{tid} {status}: {KINDS[kind]} on {', '.join(dataset_ids[:need])} "
-                    f"({region} D{delay}, {planned_sims or r.task_sims} simulations).")
+                    f"Research task #{tid} {status}: {KINDS[kind]} on {', '.join(dataset_ids[:need]) or 'existing alphas'} "
+                    f"({region} D{delay}, {planned_sims} simulations).")
         return tid
 
     async def start(self, task_id: int) -> None:
@@ -284,6 +295,9 @@ class ResearchManager:
         t = await self.get(task_id)
         if t is None:
             return
+        if t.kind == "repair":
+            await self._run_repair(t)
+            return
         scope = {"region": t.region, "delay": t.delay, "universe": t.universe}
         await self._set(task_id, stage="analyzing")
         fields: dict[str, list[tuple[str, str]]] = {}
@@ -409,6 +423,88 @@ class ResearchManager:
                     + ".", "success" if c["n_ready"] or c["n_strong"] else "info", task_id=task_id,
                     kind="task_finished")
 
+    # ------------------------------------------------------------ repair tasks
+
+    async def _scope_alphas(self, t: ResearchTask, verdicts: tuple[str, ...]) -> list[Alpha]:
+        """Alphas this repair task may work on: the ones you picked, else every unsubmitted one in its scope."""
+        async with db.session() as s:
+            stmt = select(Alpha).where(Alpha.region == t.region, Alpha.delay == t.delay, Alpha.universe == t.universe,
+                                       Alpha.type == "REGULAR", Alpha.verdict.in_(verdicts),
+                                       (Alpha.status.is_(None)) | (Alpha.status == "UNSUBMITTED"))
+            if t.alpha_ids:
+                stmt = stmt.where(Alpha.id.in_(t.alpha_ids))
+            return list(await s.scalars(stmt))
+
+    async def _adopt(self, t: ResearchTask, alphas: list[Alpha]) -> None:
+        """Record the alphas a repair task works on as its own (no simulation), so its counts and BRAIN-check totals
+        include them."""
+        if not alphas:
+            return
+        async with db.write() as s:
+            have = set(await s.scalars(select(Candidate.alpha_id).where(Candidate.task_id == t.id,
+                                                                        Candidate.origin == "seed")))
+            s.add_all(Candidate(expression=a.code or "", settings=normalize_settings(a.settings or {}),
+                                settings_hash=settings_hash(a.settings or {}), region=a.region or t.region,
+                                delay=a.delay if a.delay is not None else t.delay, origin="seed", status="reused",
+                                alpha_id=a.id, task_id=t.id, finished_at=utcnow(), hypothesis="Repair task seed")
+                      for a in alphas if a.id not in have)
+
+    async def _run_repair(self, t: ResearchTask) -> None:
+        """Turn the alphas you already have into Ready ones, cheapest first: BRAIN's check on strong alphas costs no
+        simulation, correlation failures come next, then one shared budget goes wherever a near miss is closest to
+        passing (refine.best_first)."""
+        from .decorrelate import decorrelate
+        task_id, r = t.id, settings.research
+        left_out: Counter = Counter(t.left_out or {})
+        budget = t.planned_sims
+        ctx = RefineContext(task_id=task_id, use_llm=llm.configure(), max_depth=r.repair_depth, revisit=True,
+                            resume=True, allowance=lambda: self._repair_allowance(t, budget))
+
+        async def repair_only() -> int:
+            return await self._repair_allowance(t, budget) - ROBUST_RESERVE
+
+        async def refresh() -> None:
+            await self._refresh(task_id, left_out, 0, stage="optimizing")
+
+        await self._set(task_id, stage="analyzing")
+        strong = await self._scope_alphas(t, ("strong",))
+        await self._adopt(t, strong)
+        await self._set(task_id, stage="optimizing")
+        await certify([a.id for a in strong], ctx, cap=r.check_cap)
+        await refresh()
+
+        hard = [a for a in await self._scope_alphas(t, ("promising",))
+                if a.check_state == "fail" and a.repair_state != "exhausted"
+                and set(blocking_failures(a.checks)) and set(blocking_failures(a.checks)) <= CORRELATION_CHECKS]
+        await self._adopt(t, hard)
+        for a in hard:
+            if await repair_only() <= 0:
+                break
+            await decorrelate(a, replace(ctx, resume=False, allowance=repair_only), cap=r.check_cap)
+            await refresh()
+
+        pool = await self._scope_alphas(t, ("promising", "weak"))
+        ordered = await asyncio.to_thread(closest_first, pool)          # thousands of alphas: keep the window alive
+        seeds = [a for a in ordered if a.id not in {x.id for x in hard}][:REPAIR_POOL]
+        if t.alpha_ids:                       # you chose these: try the ones automatic repair would skip as well
+            seeds += [a for a in pool if a.code and a.id not in {x.id for x in seeds}]
+        await self._adopt(t, seeds)
+
+        async def check(ids: list[str]):  # noqa: ANN202
+            report = await certify(ids, ctx, cap=r.check_cap)
+            await refresh()
+            return report
+
+        if seeds and await repair_only() > 0:
+            await best_first(seeds, replace(ctx, allowance=repair_only), check=check, on_round=refresh)
+        c = await self._refresh(task_id, left_out, 0, stage="completed")
+        await self._set(task_id, status="complete", finished_at=utcnow(),
+                        message=f"Done: {len(seeds) + len(hard) + len(strong)} alphas worked on, {c['n_simulated']} simulated, "
+                                f"{c['n_strong']} strong, {c['n_ready']} passed BRAIN's check (ready for your manual "
+                                "submission).")
+        bus.publish("simulate", f"Repair task #{task_id} complete: {c['n_simulated']} simulated, {c['n_ready']} ready.",
+                    "success" if c["n_ready"] else "info", task_id=task_id, kind="task_finished")
+
     async def _repair_allowance(self, t: ResearchTask, repair_budget: int) -> int:
         """Repair simulations the task may still spend: its reserved share, and the daily Autopilot cap."""
         left = repair_budget - await repair_spent(t.id)
@@ -417,8 +513,7 @@ class ResearchManager:
         return left
 
     async def _seeds(self, task_id: int, candidate_ids: list[int] | None, limit: int) -> list[Alpha]:
-        """Near misses worth repairing: promising, never expanded, not already failed by BRAIN's check — best score
-        first (the score credits sign-flip candidates; raw Sharpe would rank them last)."""
+        """Near misses worth repairing and never expanded, nearest to passing every check first."""
         async with db.session() as s:
             stmt = select(Candidate.alpha_id).where(Candidate.task_id == task_id, Candidate.alpha_id.is_not(None))
             if candidate_ids is not None:
@@ -426,10 +521,9 @@ class ResearchManager:
             ids = list(await s.scalars(stmt))
             if not ids:
                 return []
-            return list(await s.scalars(select(Alpha).where(
-                Alpha.id.in_(ids), Alpha.verdict == "promising", Alpha.expanded_at.is_(None),
-                (Alpha.check_state.is_(None)) | (Alpha.check_state != "fail"))
-                .order_by(Alpha.score.desc().nulls_last()).limit(limit)))
+            rows = list(await s.scalars(select(Alpha).where(Alpha.id.in_(ids), Alpha.expanded_at.is_(None),
+                                                            Alpha.verdict.in_(["promising", "weak"]))))
+        return closest_first(rows)[:limit]
 
     async def _checks_done(self, task_id: int) -> int:
         async with db.session() as s:
@@ -535,7 +629,7 @@ class ResearchManager:
                                          ResearchPlan, role="ideation", purpose="research_plan", thinking="low")
         valid = {x["id"] for x in pool}
         ids = [d for d in res.dataset_ids if d in valid]
-        kind = res.kind if res.kind in KINDS else "single"
+        kind = res.kind if res.kind in SEARCH_KINDS else "single"
         if kind == "pair" and len(ids) < 2:
             kind = "single"
         if not ids:

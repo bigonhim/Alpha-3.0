@@ -27,7 +27,7 @@ from ..llm import LLMError, llm
 from .datasets import choose_dataset
 from .evaluator import promising_or_better
 from .generators import MOVES, llm_ideas, mutation_ideas, template_ideas
-from .refine import RefineContext, certify, check_robustness, refine  # noqa: F401  (check_robustness re-exported)
+from .refine import RefineContext, certify, check_robustness, closest_first, refine  # noqa: F401  (check_robustness re-exported)
 from .simulator import CandidateSpec, simulator
 
 log = logging.getLogger(__name__)
@@ -337,8 +337,8 @@ class Autopilot:
                             allowance=self._allowance, max_depth=max(0, cfg.max_rounds - 1),
                             robustness=cfg.robustness_gate)
         if ctx.max_depth and not self._stop.is_set():
-            near = [a for a in await self._batch_alphas(bid, verdicts=("promising",), limit=6)
-                    if a.expanded_at is None and a.check_state != "fail"][:3]
+            pool = await self._batch_alphas(bid, verdicts=("promising", "weak"), limit=12)
+            near = closest_first([a for a in pool if a.expanded_at is None])[:3]
             if near:
                 self.status_line = f"Batch #{bid}: repairing {len(near)} near miss(es)"
                 await refine(near, ctx)

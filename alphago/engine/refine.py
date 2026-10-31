@@ -3,14 +3,15 @@
 Shared by research tasks (engine/research.py) and the Autopilot's AI batches (engine/autopilot.py).
 
 refine(seeds, ctx)
-    Beam search over targeted fixes. For each near miss it diagnoses which BRAIN checks fail and by how much (value
-    against BRAIN's own limit), picks fixes aimed at those checks — ordered by how often each fix has actually worked
-    on that check before (Thompson sampling over the recorded outcomes, with today's order as the prior) — simulates
-    them together, and keeps expanding the children that closed the gap they aimed at, stacking fixes, for up to
+    Beam search over targeted moves. For each near miss it measures which BRAIN checks fail, by how much and why
+    (engine/playbook.py), computes moves that can fix that cause, ranks them by the distance to passing they are
+    expected to remove times how often they have actually worked on that check (Thompson sampling over the recorded
+    outcomes), simulates them together, and keeps expanding the children that got closest, for up to
     `research.repair_depth` rounds.
 certify(alpha_ids, ctx)
     BRAIN's submission check on every strong alpha (most different first), then the robustness test for those that
-    pass; alphas that fail only on correlation get one decorrelation round.
+    pass. Alphas that fail on correlation go to engine/decorrelate.py; alphas that fail on anything else go back to
+    the repair loop.
 
 Submission is never automatic.
 """
@@ -20,7 +21,6 @@ from __future__ import annotations
 import asyncio
 import difflib
 import logging
-import math
 import random
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
@@ -34,9 +34,12 @@ from ..config import settings as app_settings
 from ..db import db
 from ..db.models import Alpha, Candidate, DataField, OptimizationAttempt
 from ..events import bus
-from ..fastexpr import (Call, Num, negate, num, parse, replace_identifier, scale_windows, trade_when_wrap, transform,
-                        wrap)
+from ..fastexpr import (Call, Num, add_backfill, inline, negate, num, parse, replace_identifier, scale_windows,
+                        trade_when_wrap, transform, validate, wrap)
+from . import playbook
+from .catalogs import get_catalog
 from .evaluator import CORRELATION_CHECKS, blocking_failures, check_map, evaluate, limits_for
+from .playbook import Elasticity, Profile, YearlyShape
 from .simulator import CandidateSpec, simulator
 
 log = logging.getLogger(__name__)
@@ -46,6 +49,13 @@ PRIOR_STRENGTH = 4.0           # pseudo-observations behind each fix's prior suc
 HELPED_BONUS = 1.3             # the fix family that improved this lineage is likely to help again
 SHARPE_DROP_OK = 0.10          # a fix may cost this much Sharpe while it fixes something else
 CLOSE_ENOUGH = 0.5             # a fix "worked" when it passes the check or closes this share of the gap
+MIN_PROGRESS = 0.85            # the beam keeps a child only if its total distance to passing fell below this share
+RECORD_ENOUGH = 6              # outcomes behind a move before its record can outrank the forecast
+RECORD_WEIGHT = 0.1            # what a perfect record is worth, on the scale of forecast gain
+MEASURING_WEIGHT = 0.2         # what one step that measures an alpha's own decay curve is worth, on the same scale
+PATIENCE = 0.5                 # best-first: each visit makes an alpha this much less urgent than its distance alone
+MAX_VISITS = 3                 # best-first: rounds of moves one alpha gets before only its children go on
+FAMILY_CAP = 2                 # variants per fix family in one alpha's round, so one idea cannot fill the round
 UPPER_BOUND = {"HIGH_TURNOVER", "CONCENTRATED_WEIGHT", "SELF_CORRELATION", "PROD_CORRELATION"}
 SHARPE_LIKE = {"LOW_SHARPE", "LOW_SUB_UNIVERSE_SHARPE", "IS_LADDER_SHARPE", "LOW_2Y_SHARPE"}
 PENDING_RECHECK = timedelta(minutes=30)
@@ -54,6 +64,7 @@ SENT = ("queued", "simulating", "done", "error")
 S, F, HT, LT = "LOW_SHARPE", "LOW_FITNESS", "HIGH_TURNOVER", "LOW_TURNOVER"
 CW, SU, LAD, Y2 = "CONCENTRATED_WEIGHT", "LOW_SUB_UNIVERSE_SHARPE", "IS_LADDER_SHARPE", "LOW_2Y_SHARPE"
 SC, PC = "SELF_CORRELATION", "PROD_CORRELATION"
+TERMINAL = {"residualize"}     # the child embeds a submitted alpha, so further rewrites would change that alpha too
 GROUP_NEUTRALIZATIONS = ["SUBINDUSTRY", "INDUSTRY", "SECTOR", "MARKET"]
 RISK_NEUTRALIZATIONS = ["STATISTICAL", "CROWDING", "SLOW_AND_FAST", "REVERSION_AND_MOMENTUM", "FAST", "SLOW"]
 GATE_EVENTS = ["ts_mean(volume, 10) > ts_mean(volume, 60)", "ts_std_dev(returns, 5) > ts_std_dev(returns, 20)",
@@ -96,10 +107,18 @@ class Diagnosis:
     fitness: float = 0.0
     turnover: float = 0.0
     returns: float = 0.0
+    profile: Profile = field(default_factory=Profile)
+    limits: dict[str, float] = field(default_factory=dict)
+
+    @property
+    def distance(self) -> float:
+        """Total normalised gap to passing every check (0 = nothing left to fix)."""
+        return sum(min(g, playbook.GAP_CAP) for g in self.gaps.values())
 
     def snapshot(self) -> dict[str, Any]:
         return {"failing": self.failing, "gaps": self.gaps, "values": self.values, "flip": self.flip,
-                "sharpe": self.sharpe, "fitness": self.fitness, "turnover": self.turnover, "returns": self.returns}
+                "sharpe": self.sharpe, "fitness": self.fitness, "turnover": self.turnover, "returns": self.returns,
+                "distance": self.distance}
 
 
 def alpha_checks(a: Alpha) -> list[dict[str, Any]]:
@@ -122,32 +141,35 @@ def alpha_checks(a: Alpha) -> list[dict[str, Any]]:
     return out
 
 
-def diagnose(a: Alpha) -> Diagnosis:
+def diagnose(a: Alpha, *, yearly: YearlyShape | None = None, elasticity: Elasticity | None = None) -> Diagnosis:
     checks = alpha_checks(a)
     ev = evaluate(sharpe=a.sharpe, fitness=a.fitness, turnover=a.turnover, checks=checks, delay=a.delay,
                   region=a.region)
     d = Diagnosis(failing=[], gaps={}, targets=[], sharpe=a.sharpe or 0.0, fitness=a.fitness or 0.0,
                   turnover=a.turnover or 0.0, returns=a.returns or 0.0)
     for c in checks:
-        v = _f(c.get("value"))
-        if v is not None and c.get("name"):
-            d.values[str(c["name"])] = v
+        v, lim = _f(c.get("value")), _f(c.get("limit"))
+        if c.get("name"):
+            if v is not None:
+                d.values[str(c["name"])] = v
+            if lim is not None:
+                d.limits[str(c["name"])] = lim
+    d.failing = blocking_failures(checks)
     if ev.flip_sign:
         d.flip = True
-        d.failing = blocking_failures(checks)
         d.targets = [S]
         d.gaps = {S: 1.0}
         return d
-    d.failing = blocking_failures(checks)
     cm = check_map(checks)
     for name in d.failing:
         gap = check_gap(cm.get(name, {}))
         d.gaps[name] = gap if gap is not None and gap > 0 else 0.25
-    d.targets = sorted(d.failing, key=lambda n: d.gaps[n], reverse=True)
-    if F in d.failing:
-        limit = _f(cm.get(F, {}).get("limit")) or ev.fitness_limit
-        potential = abs(d.sharpe) * math.sqrt(abs(d.returns) / 0.125) if d.returns else 0.0
-        d.fitness_driver = "turnover" if d.turnover > 0.15 and potential >= limit * 1.1 else "sharpe"
+    # correlation is only worth fixing on an alpha that passes everything else: repairs change the PnL it is judged on
+    metric = [n for n in d.failing if n not in CORRELATION_CHECKS]
+    d.targets = sorted(metric or d.failing, key=lambda n: d.gaps[n], reverse=True)
+    d.profile = playbook.build_profile(a, (ev.sharpe_limit, ev.fitness_limit), d.values, d.limits, d.failing,
+                                       yearly=yearly, elasticity=elasticity, settings=normalize_settings(a.settings))
+    d.fitness_driver = d.profile.causes.get(F)
     return d
 
 
@@ -164,34 +186,51 @@ class Fix:
 ALL = frozenset({"*"})
 FIXES: list[Fix] = [
     Fix("sign_flip", "sign", frozenset({S, F}), 0.9),
-    Fix("decay_up", "turnover", frozenset({HT, F}), 0.5),
+    Fix("decay_up", "turnover", frozenset({HT, F, S}), 0.5),
     Fix("decay_linear", "turnover", frozenset({HT, F}), 0.35),
     Fix("hump", "turnover", frozenset({HT, F}), 0.3),
-    Fix("decay_down", "turnover", frozenset({LT}), 0.6),
+    Fix("decay_down", "turnover", frozenset({LT, F}), 0.6),
+    Fix("speed_up", "turnover", frozenset({LT}), 0.4),
     Fix("event_gate", "event", frozenset({HT, F, S, SC, PC}), 0.2),
+    Fix("regime_gate", "event", frozenset({S, LAD, Y2}), 0.2),
     Fix("truncation", "weight", frozenset({CW}), 0.5),
-    Fix("rank_wrap", "weight", frozenset({CW, SU}), 0.35),
-    Fix("winsorize", "weight", frozenset({CW}), 0.3),
+    Fix("rank_wrap", "weight", frozenset({CW, SU, S}), 0.35),
+    Fix("winsorize", "weight", frozenset({CW, S}), 0.3),
+    Fix("sharpen", "weight", frozenset({F}), 0.3),
     Fix("size_neutral", "group", frozenset({SU}), 0.35),
     Fix("liquidity_neutral", "group", frozenset({SU}), 0.25),
+    Fix("liquid_tilt", "liquidity", frozenset({SU}), 0.4),
+    Fix("liquid_filter", "liquidity", frozenset({SU}), 0.35),
+    Fix("universe_down", "liquidity", frozenset({SU}), 0.3),
     Fix("neutralize_group", "neutral", frozenset({S, F, LAD, Y2, SU}), 0.3),
     Fix("neutralize_risk", "neutral", frozenset({S, F, LAD, Y2, SC, PC}), 0.25),
+    Fix("outperform", "neutral", frozenset({SC}), 0.25),
     Fix("group_rank", "group", frozenset({S, F, SU}), 0.25),
-    Fix("windows_short", "windows", frozenset({S, F, LAD, Y2, SC, PC}), 0.2),
-    Fix("windows_long", "windows", frozenset({S, F, HT, SC, PC}), 0.2),
-    Fix("backfill_longer", "data", frozenset({S, F}), 0.15),
-    Fix("sibling_field", "data", frozenset({SC, PC}), 0.25),
+    Fix("windows_short", "windows", frozenset({S, F, LT, LAD, Y2}), 0.2),
+    Fix("windows_long", "windows", frozenset({S, F, HT}), 0.2),
+    Fix("horizon_far", "windows", frozenset({SC, PC}), 0.25),
+    Fix("add_backfill", "data", frozenset({S, F, CW}), 0.3),
+    Fix("backfill_longer", "data", frozenset({S, F, CW}), 0.15),
+    Fix("sibling_field", "data", frozenset({SC, PC, LAD, Y2}), 0.25),
+    Fix("residualize", "residual", frozenset({SC}), 0.4),
+    Fix("compound", "stack", frozenset(), 0.3),              # two moves in one variant, planned by plan_node
     Fix("llm_refine", "llm", ALL, 0.3),
 ]
 FIX_BY_KEY = {f.key: f for f in FIXES}
 GENERIC = {"neutralize_group", "neutralize_risk", "windows_short", "windows_long", "group_rank", "llm_refine"}
+FAMILY_ALIAS = {"universe": SU, "recency": Y2, "weight": CW, "fitness": F, "signal": S, "correlation": PC}
 
 
 def fixes_for(target: str) -> list[Fix]:
     known = [f for f in FIXES if target in f.targets or f.targets is ALL]
     if any(target in f.targets for f in FIXES):
         return known
-    return [f for f in FIXES if f.key in GENERIC]         # a check this library does not know: general fixes
+    family = playbook.check_family(target)                # a check this library has not met: read its name
+    if family == "turnover":
+        return fixes_for(LT if "LOW" in target.upper() else HT)
+    if family in FAMILY_ALIAS:
+        return fixes_for(FAMILY_ALIAS[family])
+    return [f for f in FIXES if f.key in GENERIC]
 
 
 @dataclass
@@ -199,7 +238,10 @@ class FixEnv:
     region: str
     neutralizations: list[str]
     rng: random.Random
-    siblings: dict[str, str] = field(default_factory=dict)    # crowded field -> a less-used field of its dataset
+    siblings: dict[str, list[str]] = field(default_factory=dict)  # crowded field -> less-used fields of its dataset
+    universes: list[str] = field(default_factory=list)
+    collision: Any = None                                         # decorrelate.Collision when one is known
+    visited: frozenset[str] = frozenset()                         # neutralizations this lineage has already been at
 
 
 @dataclass
@@ -209,6 +251,8 @@ class Variant:
     fix: str
     target: str
     detail: str
+    cause: str | None = None
+    other_data: bool = False       # uses a submitted alpha's data too, so the parent's dataset no longer describes it
 
     @property
     def family(self) -> str:
@@ -246,27 +290,76 @@ def _scale_backfill(expr: str, factor: float, cap: int = 504) -> str | None:
     return _src(out) if changed else None
 
 
+def _final(expr: str) -> str:
+    """The expression as one statement, for moves that write it inside a bigger formula."""
+    return inline(parse(expr)).to_source()
+
+
+def _smaller_universe(current: str, universes: list[str]) -> str | None:
+    """The next universe down: the same alpha, on stocks that are more liquid."""
+    def size(u: str) -> int:
+        m = playbook.UNIVERSE_SIZE.search(u)
+        return int(m.group(1)) if m else 0
+
+    smaller = [u for u in universes if 0 < size(u) < size(current)]
+    return max(smaller, key=size) if smaller else None
+
+
 def generate(fix: Fix, expr: str, st: dict[str, Any], d: Diagnosis, env: FixEnv) -> list[tuple[str, dict, str]]:
-    """Concrete variants (expression, settings, detail) of one fix; detail strings keep today's wording."""
+    """Concrete variants (expression, settings, detail) of one fix, with parameters computed for this alpha."""
     out: list[tuple[str, dict, str]] = []
     decay = int(st.get("decay") or 0)
-    t = d.turnover
+    p = d.profile
     try:
         if fix.key == "sign_flip":
             out.append((_src(negate(expr)), st, "sign flip"))
         elif fix.key == "decay_up":
-            from .optimizer import retune_decay
-            nd = retune_decay(decay, t) if t > 0.3 else decay + max(2, decay)
-            nd = min(nd, 60)
-            if nd != decay:
+            for nd in playbook.decay_steps(p, d.targets):
                 out.append((expr, {**st, "decay": nd}, f"decay {decay}→{nd}"))
         elif fix.key == "decay_down" and decay > 0:
-            out.append((expr, {**st, "decay": decay // 2}, f"decay {decay}→{decay // 2}"))
+            spend = playbook.free_turnover_decay(p)
+            nd = spend if spend is not None else decay // 2
+            out.append((expr, {**st, "decay": nd}, f"decay {decay}→{nd}"))
+        elif fix.key == "speed_up":
+            out.append((_src(wrap(expr, "ts_av_diff", 22)), st, "ts_av_diff 22"))
         elif fix.key == "decay_linear":
-            n = 10 if t > 0.5 else 5
+            n = playbook.smoothing_window(p)
             out.append((_src(wrap(expr, "ts_decay_linear", n)), st, f"ts_decay_linear {n}"))
         elif fix.key == "hump":
-            out.append((_src(wrap(expr, "hump", hump=0.01)), st, "hump 0.01"))
+            h = playbook.hump_size(p)
+            out.append((_src(wrap(expr, "hump", hump=h)), st, f"hump {h}"))
+        elif fix.key == "regime_gate":
+            event = "rank(ts_std_dev(returns, 20)) < 0.9"
+            out.append((_src(trade_when_wrap(expr, event, "-1")), st, f"trade_when {event}"))
+        elif fix.key == "sharpen":
+            out.append((f"signed_power(rank({_final(expr)}) - 0.5, 2)", st, "sharpen cross-section"))
+        elif fix.key == "liquid_tilt":
+            out.append((f"(rank({_final(expr)}) - 0.5) * rank(adv20)", st, "liquidity tilt"))
+        elif fix.key == "liquid_filter":
+            out.append((f"if_else(rank(adv20) > 0.3, {_final(expr)}, nan)", st, "liquidity filter"))
+        elif fix.key == "universe_down":
+            smaller = _smaller_universe(str(st.get("universe")), env.universes)
+            if smaller:
+                out.append((expr, {**st, "universe": smaller}, f"universe {st.get('universe')}→{smaller}"))
+        elif fix.key == "add_backfill":
+            if not p.expr.backfilled and p.expr.fields:
+                out.append((_src(add_backfill(expr, p.expr.fields, 120)), st, "ts_backfill 120"))
+            if p.coverage is not None and p.coverage < playbook.SPARSE_COVERAGE:
+                out.append((_src(wrap(expr, "group_backfill", "subindustry", 60)), st, "group_backfill subindustry"))
+        elif fix.key == "residualize":
+            other = env.collision.code if env.collision is not None else None
+            if other:
+                out.append((f"regression_neut({_final(expr)}, {_final(other)})", st,
+                            f"residual against {env.collision.other_id}"))
+        elif fix.key == "outperform":
+            hit = env.collision
+            if hit is not None and hit.sharpe_gap is not None and 0 < hit.sharpe_gap <= 0.35:
+                current = st.get("neutralization")
+                for n in [x for x in GROUP_NEUTRALIZATIONS if x in env.neutralizations and x != current][:2]:
+                    out.append((expr, {**st, "neutralization": n}, f"outperform: neutralization {current}→{n}"))
+        elif fix.key == "horizon_far":
+            for factor, label in ((1 / 3, "⅓"), (3.0, "3")):
+                out.append((_src(scale_windows(expr, factor)), st, f"windows ×{label}"))
         elif fix.key == "event_gate":
             event = env.rng.choice(GATE_EVENTS)
             out.append((_src(trade_when_wrap(expr, event, "-1")), st, f"trade_when {event}"))
@@ -288,7 +381,11 @@ def generate(fix: Fix, expr: str, st: dict[str, Any], d: Diagnosis, env: FixEnv)
         elif fix.key in ("neutralize_group", "neutralize_risk"):
             pool = GROUP_NEUTRALIZATIONS if fix.key == "neutralize_group" else RISK_NEUTRALIZATIONS
             current = st.get("neutralization")
-            for n in [x for x in pool if x in env.neutralizations and x != current][:2]:
+            if PC in d.targets and fix.key == "neutralize_risk":
+                pool = ["CROWDING"] + [x for x in pool if x != "CROWDING"]
+            if p.causes.get(F) == "returns" and current in pool:   # a coarser neutralization keeps more of the return
+                pool = pool[pool.index(current) + 1:]
+            for n in [x for x in pool if x in env.neutralizations and x != current and x not in env.visited][:2]:
                 out.append((expr, {**st, "neutralization": n}, f"neutralization {current}→{n}"))
         elif fix.key == "group_rank":
             group = "industry" if _top_call(expr) == "group_rank" else "subindustry"
@@ -302,8 +399,9 @@ def generate(fix: Fix, expr: str, st: dict[str, Any], d: Diagnosis, env: FixEnv)
             if new:
                 out.append((new, st, "ts_backfill ×2"))
         elif fix.key == "sibling_field":
-            for old, new in list(env.siblings.items())[:1]:
-                out.append((_src(replace_identifier(expr, old, new)), st, f"field {old}→{new}"))
+            for old, news in list(env.siblings.items())[:1]:
+                for new in news[:3]:
+                    out.append((_src(replace_identifier(expr, old, new)), st, f"field {old}→{new}"))
     except Exception as exc:          # a transform that does not apply to this expression
         log.debug("fix %s failed on %s: %s", fix.key, expr, exc)
     norm = normalize_settings(st)
@@ -317,8 +415,13 @@ def generate(fix: Fix, expr: str, st: dict[str, Any], d: Diagnosis, env: FixEnv)
 class FixStats:
     by_region: dict[tuple[str, str, str], tuple[int, int]] = field(default_factory=dict)
     overall: dict[tuple[str, str], tuple[int, int]] = field(default_factory=dict)
+    by_cause: dict[tuple[str, str, str], tuple[int, int]] = field(default_factory=dict)
 
-    def get(self, fix: str, target: str, region: str | None) -> tuple[int, int]:
+    def get(self, fix: str, target: str, region: str | None, cause: str | None = None) -> tuple[int, int]:
+        """Most specific record with enough outcomes behind it: same root cause, then same region, then overall."""
+        specific = self.by_cause.get((fix, target, cause or ""))
+        if specific and sum(specific) >= 6:
+            return specific
         regional = self.by_region.get((fix, target, region or ""))
         if regional and sum(regional) >= 8:
             return regional
@@ -329,14 +432,17 @@ async def load_fix_stats() -> FixStats:
     """Successes and failures per (fix, target check), overall and per region, from recorded attempts."""
     async with db.session() as s:
         rows = (await s.execute(select(OptimizationAttempt.fix, OptimizationAttempt.target_check,
-                                       OptimizationAttempt.region, OptimizationAttempt.outcome, func.count())
+                                       OptimizationAttempt.region, OptimizationAttempt.cause,
+                                       OptimizationAttempt.outcome, func.count())
                                 .where(OptimizationAttempt.outcome.in_(["success", "failure"]),
                                        OptimizationAttempt.fix.is_not(None))
                                 .group_by(OptimizationAttempt.fix, OptimizationAttempt.target_check,
-                                          OptimizationAttempt.region, OptimizationAttempt.outcome))).all()
+                                          OptimizationAttempt.region, OptimizationAttempt.cause,
+                                          OptimizationAttempt.outcome))).all()
     st = FixStats()
-    for fix, target, region, outcome, n in rows:
-        for table, key in ((st.by_region, (fix, target, region or "")), (st.overall, (fix, target))):
+    for fix, target, region, cause, outcome, n in rows:
+        for table, key in ((st.by_region, (fix, target, region or "")), (st.overall, (fix, target)),
+                           (st.by_cause, (fix, target, cause or ""))):
             succ, fail = table.get(key, (0, 0))
             table[key] = (succ + n, fail) if outcome == "success" else (succ, fail + n)
     return st
@@ -344,12 +450,16 @@ async def load_fix_stats() -> FixStats:
 
 def rank_fixes(d: Diagnosis, stats: FixStats, region: str | None, rng: random.Random | None, *,
                used_families: frozenset[str] = frozenset(), helped_family: str | None = None,
-               allow_llm: bool = True) -> list[tuple[Fix, str]]:
-    """(fix, target) pairs, best first. rng=None ranks by the prior/observed mean (deterministic); otherwise each
-    pair is a Thompson draw from Beta(prior + successes, prior + failures)."""
+               allow_llm: bool = True, drop_harmful: bool = False) -> list[tuple[Fix, str]]:
+    """(fix, target) pairs, best first: chance of working × expected share of the distance to passing removed.
+
+    rng=None takes the prior/observed mean (deterministic); otherwise a Thompson draw from Beta(prior + successes,
+    prior + failures). Moves that cannot help are left out by arithmetic. A move forecast to leave the alpha further
+    from passing ranks last, and `drop_harmful` removes it, until your own outcomes say otherwise: with
+    RECORD_ENOUGH results behind it, a move is scored on what it actually did, whatever the forecast says."""
     scored: list[tuple[float, Fix, str]] = []
     for target in d.targets:
-        weight = 1.0 + min(d.gaps.get(target, 0.25), 2.0)
+        cause = d.profile.causes.get(target)
         for fx in fixes_for(target):
             if fx.key == "sign_flip" and not d.flip:
                 continue
@@ -359,14 +469,23 @@ def rank_fixes(d: Diagnosis, stats: FixStats, region: str | None, rng: random.Ra
                 continue
             if fx.family in used_families and fx.family != helped_family:
                 continue
-            succ, fail = stats.get(fx.key, target, region)
+            if playbook.blocked(fx.key, target, d.profile):
+                continue
+            succ, fail = stats.get(fx.key, target, region, cause)
             a0, b0 = PRIOR_STRENGTH * fx.prior + succ, PRIOR_STRENGTH * (1 - fx.prior) + fail
             draw = rng.betavariate(a0, b0) if rng else a0 / (a0 + b0)
-            if target == F and fx.family == "turnover" and d.fitness_driver:
-                draw *= 1.5 if d.fitness_driver == "turnover" else 0.6
             if helped_family and fx.family == helped_family:
                 draw *= HELPED_BONUS
-            scored.append((draw * weight, fx, target))
+            gain = 0.3 if fx.key == "llm_refine" or d.flip else playbook.predicted_gain(fx.key, target, d.gaps,
+                                                                                        d.profile, d.targets)
+            worth = gain + playbook.GAIN_FLOOR
+            if succ + fail >= RECORD_ENOUGH:
+                worth = max(worth, RECORD_WEIGHT * succ / (succ + fail))
+            elif fx.key == "decay_up" and playbook.worth_measuring(d.profile):
+                worth = max(worth, MEASURING_WEIGHT)
+            if worth <= 0 and drop_harmful:
+                continue
+            scored.append((draw * max(worth, 1e-3), fx, target))
     scored.sort(key=lambda x: x[0], reverse=True)
     seen: set[str] = set()
     out = []
@@ -381,11 +500,15 @@ def plan_static(a: Alpha, max_variants: int = 10) -> list[Variant]:
     """Deterministic plan without the database or the AI (prior order) — used by `optimizer.plan_variants`."""
     d = diagnose(a)
     st = normalize_settings(a.settings or {})
-    env = FixEnv(st["region"], brain.options.neutralizations(st["region"]), random.Random(0))
+    env = FixEnv(st["region"], brain.options.neutralizations(st["region"]), random.Random(0),
+                 universes=brain.options.universes(st["region"]))
     out: list[Variant] = []
-    for fx, target in rank_fixes(d, FixStats(), st["region"], None, allow_llm=False):
+    per_family: dict[str, int] = {}
+    for fx, target in rank_fixes(d, FixStats(), st["region"], None, allow_llm=False, drop_harmful=True):
         for e, s, detail in generate(fx, a.code or "", st, d, env):
-            out.append(Variant(e, s, fx.key, target, detail))
+            if per_family.get(fx.family, 0) < FAMILY_CAP:
+                per_family[fx.family] = per_family.get(fx.family, 0) + 1
+                out.append(Variant(e, s, fx.key, target, detail, d.profile.causes.get(target)))
     return _dedupe(out)[:max_variants]
 
 
@@ -419,16 +542,28 @@ def judge(snapshot: dict[str, Any], target: str, child: Alpha | None, cand: Cand
             return "failure"                  # decorrelated, but no longer passes the IS tests
         c = check_map(child.checks).get(target) if child.checked_at else None
         result = str((c or {}).get("result", "")).upper()
-        return "success" if result == "PASS" else "failure" if result in ("FAIL", "ERROR") else None
-    if (child_fail - parent_fail) - CORRELATION_CHECKS:
-        return "failure"                      # fixed one thing, broke another
+        if result == "FAIL":
+            parent_gap, child_gap = (snapshot.get("gaps") or {}).get(target), check_gap(c or {})
+            closed = parent_gap and child_gap is not None and (parent_gap - child_gap) / parent_gap >= CLOSE_ENOUGH
+            return "success" if closed else "failure"
+        return "success" if result == "PASS" else None     # ERROR or PENDING: no answer yet
+    c = check_map(checks).get(target)
+    if c is None and child.checked_at:     # a check only BRAIN's full /check reports
+        c = check_map(child.checks).get(target)
+    new_fail = (child_fail - parent_fail) - CORRELATION_CHECKS
+    if new_fail:                           # fixed one thing, broke another: worth it only if far closer overall
+        fixed = c is not None and str(c.get("result", "")).upper() == "PASS"
+        before = _f(snapshot.get("distance"))
+        return "success" if fixed and before and diagnose(child).distance <= 0.5 * before else "failure"
     p_sharpe = _f(snapshot.get("sharpe")) or 0.0
     if S in child_fail and child.sharpe < p_sharpe - SHARPE_DROP_OK and not snapshot.get("flip"):
         return "failure"
-    c = check_map(checks).get(target)
     if c is None:
-        return "success" if target not in child_fail else "failure"
-    if str(c.get("result", "")).upper() not in ("FAIL", "ERROR"):
+        return "failure" if target in child_fail else None   # the simulation does not report it: wait for /check
+    result = str(c.get("result", "")).upper()
+    if result in ("ERROR", "PENDING"):
+        return None
+    if result != "FAIL":
         return "success"
     parent_gap = (snapshot.get("gaps") or {}).get(target)
     child_gap = check_gap(c)
@@ -524,8 +659,11 @@ class RefineContext:
     beam: int = 2
     wait_timeout: float | None = 6 * 3600
     collide: str | None = None          # decorrelation: the submitted alpha's expression it collides with
+    collision: Any = None               # decorrelate.Collision: what it collides with, and how hard
     robustness: bool | None = None      # run the robustness test after a pass (None = settings.research)
     seed: int | None = None
+    revisit: bool = False               # also take alphas expanded before; moves already tried are not repeated
+    resume: bool = False                # carry on from the best child of the lineage, not from the seed itself
 
     def stopped(self) -> bool:
         return bool(self.stop is not None and self.stop.is_set())
@@ -545,6 +683,7 @@ class Node:
     root: str
     families: frozenset[str] = frozenset()
     helped: str | None = None
+    visited: frozenset[str] = frozenset()    # neutralizations on the path here, so a lineage cannot walk back
 
 
 @dataclass
@@ -557,8 +696,8 @@ class RefineReport:
     stopped: str | None = None
 
 
-async def _siblings(a: Alpha, st: dict[str, Any]) -> dict[str, str]:
-    """For decorrelation: the expression's most crowded data field -> the closest-named, less-used field of the same
+async def _siblings(a: Alpha, st: dict[str, Any]) -> dict[str, list[str]]:
+    """For new information: the expression's most crowded data field -> the closest-named, less-used fields of the same
     dataset (MATRIX, coverage ≥ 50%)."""
     ds = str((a.dataset_ids or [""])[0] or "").split(",")[0]
     used = set(a.fields or [])
@@ -577,37 +716,147 @@ async def _siblings(a: Alpha, st: dict[str, Any]) -> dict[str, str]:
             and (r.alpha_count or 0) < (crowded.alpha_count or 0)]
     if not pool:
         return {}
-    best = max(pool, key=lambda r: difflib.SequenceMatcher(None, r.id, crowded.id).ratio())
-    return {crowded.id: best.id}
+    pool.sort(key=lambda r: difflib.SequenceMatcher(None, r.id, crowded.id).ratio(), reverse=True)
+    return {crowded.id: [r.id for r in pool[:3]]}
+
+
+async def _decay_points(a: Alpha) -> list[tuple[int, float, float, float]]:
+    """(decay, turnover, Sharpe, returns) of this exact expression at every decay simulated so far. Prefers this
+    neutralization, but a curve measured under another is still far better than the defaults: changing neutralization
+    moves the level, not how the signal decays."""
+    if not a.canonical_hash:
+        return []
+    async with db.session() as s:
+        rows = list(await s.scalars(select(Alpha).where(
+            Alpha.canonical_hash == a.canonical_hash, Alpha.region == a.region, Alpha.delay == a.delay,
+            Alpha.universe == a.universe)))
+    groups: dict[str, list[Alpha]] = {}
+    for r in rows:
+        if r.turnover:
+            groups.setdefault(r.neutralization or "", []).append(r)
+    mine = groups.get(a.neutralization or "", [])
+    if len({r.decay for r in mine}) < 2:
+        mine = max(groups.values(), key=lambda g: len({r.decay for r in g}), default=[])
+    return [(int(r.decay or 0), r.turnover, r.sharpe or 0.0, r.returns or 0.0) for r in mine]
+
+
+async def measure(a: Alpha, *, fetch_pnl: bool = False) -> Diagnosis:
+    """Diagnose with everything known about this alpha: its own decay curve, and when the signal itself is the problem,
+    how its Sharpe was earned year by year (one free GET of its daily PnL)."""
+    from . import pnl
+    plain = diagnose(a)
+    yearly = None
+    if fetch_pnl and {S, LAD, Y2} & set(plain.targets) and not plain.flip:
+        try:
+            row = await pnl.fetch(a.id, keep_raw=False)
+            yearly = playbook.yearly_shape(row.dates, row.daily) if row is not None else None
+        except Exception as exc:
+            log.info("no daily PnL for %s: %s", a.id, getattr(exc, "message", exc))
+    return diagnose(a, yearly=yearly, elasticity=playbook.fit_elasticity(await _decay_points(a)))
+
+
+async def _tried(alpha_id: str) -> set[str]:
+    """Move descriptions already spent on this alpha."""
+    async with db.session() as s:
+        return set(await s.scalars(select(OptimizationAttempt.kind).where(
+            OptimizationAttempt.parent_alpha_id == alpha_id)))
+
+
+def _compound(variants: list[Variant], d: Diagnosis, env: FixEnv) -> Variant | None:
+    """With two failing checks, one variant carries the best move for each at once: stacking in a single simulation
+    what would otherwise take two rounds."""
+    first = next(iter(variants), None)
+    other = next((v for v in variants if first and v.target != first.target and v.family != first.family), None)
+    if first is None or other is None or other.fix not in FIX_BY_KEY:
+        return None
+    made = generate(FIX_BY_KEY[other.fix], first.expr, first.settings, d, env)
+    if not made:
+        return None
+    expr, st, detail = made[0]
+    return Variant(expr, st, "compound", first.target, f"{first.detail} + {detail}"[:200], first.cause)
+
+
+def repairable(a: Alpha) -> bool:
+    """Worth simulations: promising, or weak on paper but with a Sharpe that passes and only trading-style checks
+    failing (Sharpe 1.6 at 60% turnover grades "weak", yet is among the easiest repairs there are). Alphas failing only
+    on correlation take the decorrelation route instead."""
+    if not a.code or a.repair_state == "exhausted" or (a.type or "REGULAR") != "REGULAR":
+        return False
+    if a.verdict not in ("promising", "weak"):
+        return False
+    d = diagnose(a)
+    failing = set(d.failing)
+    if failing and failing <= CORRELATION_CHECKS:
+        return False
+    if playbook.beyond_reach(d.gaps):
+        return False
+    if a.verdict == "promising":
+        return True
+    return not d.flip and d.sharpe >= d.profile.sharpe_limit * 0.9 and failing <= {F, HT, LT, CW}
+
+
+def closest_first(alphas: list[Alpha]) -> list[Alpha]:
+    """Repairable alphas, the ones nearest to passing every check first."""
+    return sorted((a for a in alphas if repairable(a)), key=lambda a: diagnose(a).distance)
+
+
+def repair_plan(a: Alpha, max_moves: int = 6) -> dict[str, Any]:
+    """What the repair engine sees in this alpha: the diagnosis in sentences and the moves it would run next."""
+    d = diagnose(a)
+    lines = playbook.prescription(d.failing, d.gaps, d.values, d.profile, d.limits)
+    if d.flip:
+        lines = ["Strongly negative Sharpe: the sign-flipped alpha is the candidate."] + lines
+    moves = [f"{v.detail} (for {v.target})" for v in plan_static(a, max_moves)] if a.code and d.targets else []
+    return {"lines": lines, "moves": moves, "distance": round(d.distance, 3), "state": a.repair_state,
+            "note": a.repair_note, "correlation_only": bool(d.failing) and set(d.failing) <= CORRELATION_CHECKS,
+            "out_of_reach": playbook.beyond_reach(d.gaps)}
 
 
 async def plan_node(node: Node, d: Diagnosis, fanout: int, stats: FixStats, ctx: RefineContext,
                     rng: random.Random) -> list[Variant]:
     a = node.alpha
     st = normalize_settings(a.settings or {})
-    env = FixEnv(st["region"], brain.options.neutralizations(st["region"]), rng)
-    if set(d.targets) & CORRELATION_CHECKS:
+    env = FixEnv(st["region"], brain.options.neutralizations(st["region"]), rng,
+                 universes=brain.options.universes(st["region"]), collision=ctx.collision, visited=node.visited)
+    if set(d.targets) & (CORRELATION_CHECKS | {LAD, Y2}):
         env.siblings = await _siblings(a, st)
+    catalog = await get_catalog(st["region"], st["delay"], st["universe"])
+    tried = await _tried(a.id) if ctx.revisit else set()
     from ..llm import llm
     allow_llm = ctx.use_llm and llm.configure()
     variants: list[Variant] = []
+    per_family: dict[str, int] = {}
     llm_slots, llm_target = 0, None
-    for fx, target in rank_fixes(d, stats, st["region"], rng, used_families=node.families,
-                                 helped_family=node.helped, allow_llm=allow_llm):
+    # the move expected to do most always runs; Thompson draws decide what is tried alongside it
+    used = {"used_families": node.families, "helped_family": node.helped, "allow_llm": allow_llm, "drop_harmful": True}
+    order = rank_fixes(d, stats, st["region"], None, **used)[:1] + rank_fixes(d, stats, st["region"], rng, **used)
+    for fx, target in list(dict.fromkeys(order)):
         if len(variants) + llm_slots >= fanout:
             break
         if fx.key == "llm_refine":
             llm_slots, llm_target = min(3, fanout - len(variants)), target
             continue
         for e, s, detail in generate(fx, a.code or "", st, d, env):
-            if len(variants) + llm_slots < fanout:
-                variants.append(Variant(e, s, fx.key, target, detail))
+            if len(variants) + llm_slots >= fanout or per_family.get(fx.family, 0) >= FAMILY_CAP:
+                break
+            if detail[:48] in tried or not validate(e, catalog).ok:
+                continue
+            per_family[fx.family] = per_family.get(fx.family, 0) + 1
+            variants.append(Variant(e, s, fx.key, target, detail, d.profile.causes.get(target),
+                                    other_data=fx.key == "residualize"))
+    if len(d.targets) >= 2 and fanout >= 3:
+        stacked = _compound(variants, d, env)
+        if stacked and stacked.detail[:48] not in tried and validate(stacked.expr, catalog).ok:
+            variants.insert(1, stacked)
+            variants = variants[:fanout]
     if llm_slots:
         from .optimizer import llm_refine
         try:
-            specs = await llm_refine(a, k=llm_slots, tried=await tried_lines(a.id), collide=ctx.collide)
+            rx = playbook.prescription(d.failing, d.gaps, d.values, d.profile, d.limits)
+            specs = await llm_refine(a, k=llm_slots, tried=await tried_lines(a.id), collide=ctx.collide,
+                                     prescription="\n".join(rx))
             variants += [Variant(sp.expression, normalize_settings(sp.settings), "llm_refine", llm_target or S,
-                                 "llm refine") for sp in specs]
+                                 "llm refine", d.profile.causes.get(llm_target or S)) for sp in specs]
         except Exception as exc:
             log.warning("AI refine failed for %s: %s", a.id, exc)
     return _dedupe(variants)
@@ -646,9 +895,10 @@ async def _submit_round(planned: list[tuple[Node, Variant]], ctx: RefineContext,
     for node, v in planned:
         spec = CandidateSpec(
             expression=v.expr, settings=v.settings, origin="optimize", parent_alpha_id=node.alpha.id,
-            dataset_id=(node.alpha.dataset_ids or [None])[0], task_id=ctx.task_id,
+            dataset_id=None if v.other_data else (node.alpha.dataset_ids or [None])[0], task_id=ctx.task_id,
             hypothesis=f"Repair of {node.alpha.id}: {v.detail} (aimed at {v.target})",
-            rationale={"kind": v.detail, "fix": v.fix, "target": v.target, "depth": depth, "root": node.root})
+            rationale={"kind": v.detail, "fix": v.fix, "target": v.target, "depth": depth, "root": node.root,
+                       "cause": v.cause})
         specs.append(spec)
         keyed[(v.expr.strip(), settings_hash(v.settings))] = (node, v)
     res = await simulator.prepare(specs, batch_id=ctx.batch_id, task_id=ctx.task_id, initial_status="approved")
@@ -668,7 +918,7 @@ async def _submit_round(planned: list[tuple[Node, Variant]], ctx: RefineContext,
             att = OptimizationAttempt(
                 parent_alpha_id=node.alpha.id, candidate_id=cand.id, kind=v.detail[:48], detail=v.expr[:500],
                 fix=v.fix, target_check=v.target[:48], depth=depth, root_alpha_id=node.root,
-                region=node.alpha.region, parent_snapshot=d.snapshot(),
+                region=node.alpha.region, parent_snapshot=d.snapshot(), cause=v.cause,
                 child_alpha_id=cand.alpha_id if cand.status == "reused" else None)
             s.add(att)
             await s.flush()
@@ -690,19 +940,53 @@ async def expand_once(a: Alpha, ctx: RefineContext, *, depth: int = 1) -> list[i
     """One round of fixes for one alpha without waiting (the alpha page's 'Optimise'). Returns candidate ids."""
     node = Node(alpha=a, depth=0, root=a.id)
     rng = random.Random(ctx.seed)
-    planned = [(node, v) for v in await plan_node(node, diagnose(a), ctx.root_fanout, await load_fix_stats(), ctx,
-                                                  rng)]
+    planned = [(node, v) for v in await plan_node(node, await measure(a, fetch_pnl=True), ctx.root_fanout,
+                                                  await load_fix_stats(), ctx, rng)]
     await _mark_expanded([a.id])
     created, reused, attempts = await _submit_round(planned, ctx, depth)
     await resolve_attempts(attempt_ids=attempts)
     return created + reused
 
 
+def progressed(parent: Diagnosis, kid: Diagnosis) -> bool:
+    """The child is worth building on: clearly closer to passing overall, not just inside the noise on Sharpe."""
+    if kid.distance > parent.distance * MIN_PROGRESS:
+        return False
+    if len(kid.failing) < len(parent.failing) or not set(parent.failing) <= SHARPE_LIKE:
+        return True
+    return any(kid.values.get(n, 0.0) - parent.values.get(n, 0.0) >= SHARPE_NOISE for n in parent.failing)
+
+
+async def _resume_node(seed: Alpha) -> Node:
+    """Where a seed's repair stands: its closest descendant so far, with the fix families that lineage already used."""
+    async with db.session() as s:
+        atts = list(await s.scalars(select(OptimizationAttempt).where(OptimizationAttempt.root_alpha_id == seed.id,
+                                                                      OptimizationAttempt.child_alpha_id.is_not(None))))
+    kids = await _load_alphas([x.child_alpha_id for x in atts if x.child_alpha_id])
+    best, best_d = seed, diagnose(seed).distance
+    for k in kids.values():
+        if k.verdict in ("promising", "weak") and k.code:
+            dist = diagnose(k).distance
+            if 0 < dist < best_d:
+                best, best_d = k, dist
+    families = frozenset(FIX_BY_KEY[x.fix].family for x in atts if x.fix in FIX_BY_KEY and x.outcome == "failure")
+    return Node(alpha=best, depth=0, root=seed.id, families=families)
+
+
+async def _mark_exhausted(ids: list[str], note: str) -> None:
+    if ids:
+        async with db.write() as s:
+            await s.execute(update(Alpha).where(Alpha.id.in_(ids)).values(repair_state="exhausted", repair_note=note))
+
+
 async def refine(seeds: list[Alpha], ctx: RefineContext) -> RefineReport:
-    """Repair near misses: diagnose → targeted fixes → simulate → expand the children that closed their gap."""
+    """Repair near misses: measure → targeted moves → simulate → expand the children that got closest to passing."""
     report = RefineReport()
     rng = random.Random(ctx.seed)
-    frontier = [Node(alpha=a, depth=0, root=a.id) for a in seeds if a.code and a.expanded_at is None]
+    usable = [a for a in seeds if a.code and (ctx.revisit or a.expanded_at is None)]
+    frontier = [await _resume_node(a) if ctx.resume else Node(alpha=a, depth=0, root=a.id) for a in usable]
+    roots_strong: set[str] = set()
+    cut_short = False
     for depth in range(1, max(0, ctx.max_depth) + 1):
         if not frontier:
             break
@@ -715,16 +999,19 @@ async def refine(seeds: list[Alpha], ctx: RefineContext) -> RefineReport:
             break
         stats = await load_fix_stats()          # reloaded each round: this run's outcomes count at once
         planned: list[tuple[Node, Variant]] = []
+        chart: dict[str, Diagnosis] = {}
         for node in frontier:
-            d = diagnose(node.alpha)
+            d = chart[node.alpha.id] = await measure(node.alpha, fetch_pnl=node.depth == 0)
             if not d.targets:
                 continue
             fanout = ctx.root_fanout if node.depth == 0 else ctx.node_fanout
             planned += [(node, v) for v in await plan_node(node, d, fanout, stats, ctx, rng)]
         await _mark_expanded([n.alpha.id for n in frontier])
         report.expanded += [n.alpha.id for n in frontier]
+        cut_short = cut_short or len(planned) > allowance
         planned = _round_robin(planned, allowance)
         if not planned:
+            frontier = []
             break
         created, reused, attempt_ids = await _submit_round(planned, ctx, depth)
         report.rounds += 1
@@ -742,25 +1029,131 @@ async def refine(seeds: list[Alpha], ctx: RefineContext) -> RefineReport:
         for att in atts:
             by_parent.setdefault(att.parent_alpha_id, []).append(att)
         next_frontier: list[Node] = []
+        twins: set[tuple[float, float, float]] = set()
         for node in frontier:
             winners = []
+            before = chart.get(node.alpha.id) or diagnose(node.alpha)
             for att in by_parent.get(node.alpha.id, []):
                 kid = kids.get(att.child_alpha_id or "")
                 if kid is None:
                     continue
-                if kid.verdict in ("strong", "ready") and kid.id not in report.strong:
-                    report.strong.append(kid.id)
-                elif att.outcome == "success" and kid.expanded_at is None and kid.verdict in ("promising", "weak"):
-                    winners.append((kid.score or 0.0, kid, att))
-            winners.sort(key=lambda w: w[0], reverse=True)
-            for _, kid, att in winners[:ctx.beam]:
+                if kid.verdict in ("strong", "ready"):
+                    roots_strong.add(node.root)
+                    if kid.id not in report.strong:
+                        report.strong.append(kid.id)
+                elif kid.expanded_at is None and kid.verdict in ("promising", "weak") and att.fix not in TERMINAL:
+                    after = diagnose(kid)
+                    if progressed(before, after):
+                        winners.append((after.distance, kid, att))
+            winners.sort(key=lambda w: w[0])
+            kept = 0
+            for _, kid, att in winners:
+                result = (round(kid.sharpe or 0.0, 3), round(kid.fitness or 0.0, 3), round(kid.turnover or 0.0, 3))
+                if kept >= ctx.beam or result in twins:      # same numbers = same alpha in other words: expand it once
+                    continue
+                twins.add(result)
+                kept += 1
                 fam = FIX_BY_KEY[att.fix].family if att.fix in FIX_BY_KEY else "llm"
                 next_frontier.append(Node(alpha=kid, depth=depth, root=node.root, families=node.families | {fam},
-                                          helped=fam))
+                                          helped=fam,
+                                          visited=node.visited | {str(node.alpha.neutralization or "")}))
         frontier = next_frontier
+    if not (frontier or cut_short or report.stopped):
+        spent = [a.id for a in usable if a.id not in roots_strong]
+        await _mark_exhausted(spent, "Every move that could help was tried and none got it past its failing checks.")
     if report.strong:
         bus.publish("optimize", f"Repair loop: {len(report.strong)} near miss(es) turned strong "
                                 f"({report.simulated} simulations, {report.rounds} rounds).", "success")
+    return report
+
+
+async def best_first(seeds: list[Alpha], ctx: RefineContext, *,
+                     check: Callable[[list[str]], Awaitable["CertifyReport"]] | None = None,
+                     on_round: Callable[[], Awaitable[None]] | None = None, width: int = 3,
+                     fanout: int = 4) -> RefineReport:
+    """Spend one budget across many near misses where it is likeliest to finish: each round takes the few alphas nearest
+    to passing, from any lineage, and runs their next best moves. A lineage that stops improving falls behind the others
+    by itself, so simulations go to what is close rather than to whatever was picked first.
+
+    `check` runs BRAIN's check on new strong alphas; a seed is finished once one of its descendants passes it."""
+    report = RefineReport()
+    rng = random.Random(ctx.seed)
+    sub = replace(ctx, revisit=True)
+    nodes = [await _resume_node(a) if ctx.resume else Node(alpha=a, depth=0, root=a.id) for a in seeds if a.code]
+    roots = [n.root for n in nodes]
+    tries: dict[str, int] = {}
+    solved: set[str] = set()
+    cut_short = False
+    while nodes:
+        if ctx.stopped():
+            report.stopped = "stopped"
+            break
+        allowance = await ctx.budget()
+        if allowance <= 0:
+            report.stopped = "budget"
+            break
+        nodes.sort(key=lambda n: diagnose(n.alpha).distance * (1.0 + PATIENCE * tries.get(n.alpha.id, 0)))
+        stats = await load_fix_stats()
+        planned: list[tuple[Node, Variant]] = []
+        chart: dict[str, Diagnosis] = {}
+        for node in list(nodes[:width]):
+            first = node.alpha.id not in tries
+            d = chart[node.alpha.id] = await measure(node.alpha, fetch_pnl=first and node.depth == 0)
+            variants = await plan_node(node, d, fanout, stats, sub, rng) if d.targets else []
+            tries[node.alpha.id] = tries.get(node.alpha.id, 0) + 1
+            planned += [(node, v) for v in variants]
+            if not variants or tries[node.alpha.id] >= MAX_VISITS:
+                nodes.remove(node)
+        if not planned:
+            continue
+        await _mark_expanded(list({n.alpha.id for n, _ in planned}))
+        cut_short = cut_short or len(planned) > allowance
+        planned = _round_robin(planned, allowance)
+        created, reused, attempt_ids = await _submit_round(planned, sub, report.rounds + 1)
+        report.rounds += 1
+        report.simulated += len(created)
+        report.attempts += len(attempt_ids)
+        await _wait(created, ctx)
+        await resolve_attempts(attempt_ids=attempt_ids)
+        async with db.session() as s:
+            atts = list(await s.scalars(select(OptimizationAttempt).where(
+                OptimizationAttempt.id.in_(attempt_ids or [-1]))))
+        kids = await _load_alphas([x.child_alpha_id for x in atts if x.child_alpha_id])
+        by_alpha = {n.alpha.id: n for n, _ in planned}
+        twins: set[tuple[float, float, float]] = set()
+        fresh: list[tuple[Node, Alpha]] = []
+        for att in atts:
+            node, kid = by_alpha.get(att.parent_alpha_id), kids.get(att.child_alpha_id or "")
+            if node is None or kid is None:
+                continue
+            if kid.verdict in ("strong", "ready"):
+                if kid.id not in report.strong:
+                    report.strong.append(kid.id)
+                    fresh.append((node, kid))
+                continue
+            result = (round(kid.sharpe or 0.0, 3), round(kid.fitness or 0.0, 3), round(kid.turnover or 0.0, 3))
+            if (kid.verdict in ("promising", "weak") and kid.expanded_at is None and att.fix not in TERMINAL
+                    and result not in twins and progressed(chart.get(node.alpha.id) or diagnose(node.alpha),
+                                                           diagnose(kid))):
+                twins.add(result)
+                fam = FIX_BY_KEY[att.fix].family if att.fix in FIX_BY_KEY else "llm"
+                nodes.append(Node(alpha=kid, depth=node.depth + 1, root=node.root, families=node.families | {fam},
+                                  helped=fam, visited=node.visited | {str(node.alpha.neutralization or "")}))
+        for node, kid in fresh:
+            passed = kid.verdict == "ready"
+            if check is not None and not passed:
+                passed = kid.id in (await check([kid.id])).passed
+            if passed or check is None:
+                solved.add(node.root)
+        nodes = [n for n in nodes if n.root not in solved]
+        if on_round is not None:
+            await on_round()
+    if not (nodes or cut_short or report.stopped):
+        await _mark_exhausted([r for r in roots if r not in solved],
+                              "Every move that could help was tried and none got it past its failing checks.")
+    if report.strong:
+        bus.publish("optimize", f"Repair: {len(report.strong)} near miss(es) turned strong ({report.simulated} "
+                                f"simulations, {report.rounds} rounds).", "success")
     return report
 
 
@@ -772,6 +1165,7 @@ class CertifyReport:
     passed: list[str] = field(default_factory=list)
     fragile: list[str] = field(default_factory=list)
     corr_failed: list[str] = field(default_factory=list)
+    metric_failed: list[str] = field(default_factory=list)
     repaired: list[str] = field(default_factory=list)
 
 
@@ -780,7 +1174,9 @@ def _needs_check(a: Alpha, now: datetime) -> bool:
         return False
     if a.check_state in (None, "", "none", "stale"):
         return True
-    return a.check_state == "pending" and (a.checked_at is None or now - a.checked_at > PENDING_RECHECK)
+    from .actions import MAX_CHECK_TRIES
+    return (a.check_state == "pending" and (a.check_tries or 0) < MAX_CHECK_TRIES
+            and (a.checked_at is None or now - a.checked_at > PENDING_RECHECK))
 
 
 async def order_for_check(alphas: list[Alpha]) -> list[Alpha]:
@@ -824,34 +1220,10 @@ def _corr(df, a: str, b: str) -> float:  # noqa: ANN001
     return float(c) if c == c else 0.0
 
 
-async def _colliding_expression(a: Alpha) -> str | None:
-    """Expression of the submitted alpha this one is most correlated with (BRAIN's correlation list, else our
-    estimate)."""
-    from . import actions
-    other = None
-    try:
-        res = await actions.correlations(a.id, "self")
-        best = None
-        for rec in res.get("records") or []:
-            corr = next((v for k, v in rec.items() if "corr" in k.lower() and isinstance(v, (int, float))), None)
-            aid = rec.get("id") or rec.get("alphaId") or rec.get("alpha_id")
-            if aid and corr is not None and (best is None or corr > best[0]):
-                best = (corr, str(aid))
-        other = best[1] if best else None
-    except Exception as exc:
-        log.info("correlation list for %s unavailable: %s", a.id, getattr(exc, "message", exc))
-    other = other or a.est_corr_with
-    if not other:
-        return None
-    async with db.session() as s:
-        row = await s.get(Alpha, other)
-    return row.code if row and row.code else None
-
-
 async def certify(alpha_ids: list[str], ctx: RefineContext, *, cap: int | None = None,
                   corr_repair: bool = True) -> CertifyReport:
-    """BRAIN /check on the task's strong alphas (no simulation quota), robustness for those that pass, one
-    decorrelation round for those that fail only on correlation."""
+    """BRAIN /check on the task's strong alphas (no simulation quota), robustness for those that pass; those that fail
+    go to the route that fits: decorrelation for correlation, the repair loop for anything else."""
     from . import actions
     from .similarity import estimate_self_corr
     report = CertifyReport()
@@ -889,10 +1261,13 @@ async def certify(alpha_ids: list[str], ctx: RefineContext, *, cap: int | None =
         a = after.get(aid)
         if a is None:
             continue
+        failing = set(blocking_failures(a.checks))
         if a.check_state == "pass":
             report.passed.append(aid)
-        elif set(blocking_failures(a.checks)) and set(blocking_failures(a.checks)) <= CORRELATION_CHECKS:
+        elif failing and failing <= CORRELATION_CHECKS:
             report.corr_failed.append(aid)
+        elif failing:
+            report.metric_failed.append(aid)
     for aid in report.passed:
         if ctx.stopped():
             break
@@ -910,14 +1285,17 @@ async def certify(alpha_ids: list[str], ctx: RefineContext, *, cap: int | None =
                 if best:                       # the neighbour that held up best is a free second candidate
                     await certify([best], replace(ctx), cap=1, corr_repair=False)
     if corr_repair:
+        from .decorrelate import decorrelate
         for aid in report.corr_failed[:3]:
             if ctx.stopped() or await ctx.budget() <= 0:
                 break
-            a = after[aid]
-            sub = replace(ctx, max_depth=1, collide=await _colliding_expression(a))
-            rep = await refine([a], sub)
+            report.repaired += await decorrelate(after[aid], ctx, cap=cap)
+        for aid in report.metric_failed[:3]:
+            if ctx.stopped() or await ctx.budget() <= 0:
+                break
+            rep = await refine([after[aid]], replace(ctx, revisit=True))
             if rep.strong:
-                more = await certify(rep.strong, sub, cap=min(3, cap), corr_repair=False)
+                more = await certify(rep.strong, ctx, cap=min(3, cap), corr_repair=False)
                 report.repaired += more.passed
     return report
 

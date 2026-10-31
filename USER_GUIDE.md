@@ -12,6 +12,19 @@ It is a local, single-user app:
 - Every alpha, simulation and task is kept in a local SQLite database (alphago.db), and your settings in settings.json, both in `%APPDATA%\AlphaGo`.
 - Only BRAIN and the AI provider you chose are contacted, plus Yahoo Finance when you test an SPC prompt (tickers and dates only). With a local Ollama model, AI prompts never leave your PC.
 
+### What's new on 31 October 2026
+
+- **Targeted repair.** The optimiser now works out why each check fails before choosing a move. Fitness, for example, is split into three causes: turnover, thin returns or a weak signal. Moves come with values worked out for that alpha, and moves that cannot help are never simulated. A turnover cut on an alpha already under 12.5% turnover is one: Fitness does not charge for turnover below that.
+- **Repair near misses task.** One click works through the alphas you already have: BRAIN's check on strong alphas, the correlation route, then near misses. Each round goes to whichever alpha is closest to passing, so a stuck one falls behind by itself. It stops at the budget you set. See [Tasks](#tasks--everything-that-runs).
+- **Strong to Ready.** Correlation failures now get several rounds aimed at what the alpha collides with. Other failures from BRAIN's check go back to repair.
+- **The check can no longer jam or mislead:**
+  - an empty reply from BRAIN is never a pass;
+  - a BRAIN error means "ask again", not "failed";
+  - a daily submission limit no longer marks an alpha as failed;
+  - unanswered checks are asked again automatically, up to 3 times.
+- **Why no Ready yet?** The Quota Planner page now shows where your alphas stand and the most useful next step. **Copy report** gives counts only, with no alpha ids or expressions.
+- **Repair plan** on the alpha details window shows the diagnosis, the next moves and what was tried.
+
 ### What's new on 21 October 2026
 
 - **Getting to submittable.** Four things kept alphas from reaching *ready*, and all four are fixed:
@@ -241,6 +254,7 @@ Every dataset in the chosen **Region / Delay / Universe** is rated by your AI mo
 | **Stop All / Run All** | Stop All halts the AI idea batches and pauses every running task and the queue; Run All resumes the queue and every paused or queued task |
 | Tiles | **Running Cores** (task simulations running / current slot limit, normally 8), **Cores Assigned**, **Simulations Assigned**, **Simulated** |
 | **Autopilot** card | Mode, scope, focus, and the latest daily plans with their status |
+| **Repair near misses…** | Starts a repair task on every strong and near-miss alpha in a scope. You set the budget (150 by default). **Spends quota**, up to that budget; BRAIN's check costs none. It never starts by itself |
 | **Research tasks** table | Task (kind and scope, with a Manual or Autopilot badge), status, cores, a progress bar (done / planned), best Sharpe, datasets. Tick rows, then **Approve**, **Pause**, **Resume**, **Stop** or **Delete**. **New task…** creates one. Double-click a task to list its alphas, best first |
 | **Simulation queue** | Queued, simulating, slots; **Pause queue / Resume queue**, **Cancel all queued** |
 | **Candidate statuses** | Counts from new to cancelled |
@@ -263,6 +277,8 @@ Double-click a row (or click its Alpha id) for the details window:
 | **Check** | Runs BRAIN's full submission check, including self- and prod-correlation. Can take a minute or more |
 | **Submit…** | Opens the submit confirmation. Greyed out for alphas already ACTIVE |
 | **Optimise** | Queues up to 8 targeted variants plus up to 3 AI refinements. **Spends quota** |
+| **Repair…** | Starts a repair task on this alpha, over several rounds, up to the budget you set. **Spends quota** |
+| **Repair plan** | Why each check fails, with the numbers it needs (for Fitness: the turnover, returns or Sharpe that would pass), the next moves, what was tried, or why repair stopped |
 | **PnL & yearly stats** | PnL chart and a table of yearly results from BRAIN |
 | **Self-correlation** | Your highest correlation with your other alphas |
 | **Properties** | Name, tags, colour and description. **Write with AI** drafts the description; **Save to BRAIN** stores them (the description for regular alphas only) |
@@ -274,7 +290,7 @@ Double-click a row (or click its Alpha id) for the details window:
 | `ready` | BRAIN's full check passed, correlation included | Review and submit |
 | `strong` | No in-sample test fails (pending tests and warnings allowed); the full check has not passed yet, or the robustness gate held it back | Run **Check** |
 | `promising` | A test fails, but Sharpe is at least 70% and fitness at least 50% of their limits; or every test passes except self- or prod-correlation | **Optimise**, or change the idea |
-| `weak` | Sharpe 50–70% of the limit, or higher with fitness under half its limit | Usually drop it |
+| `weak` | Sharpe 50–70% of the limit, or higher with fitness under half its limit | Usually drop it. With a passing Sharpe and only turnover, fitness or weight failing, repair is worth trying and a repair task includes it |
 | `rejected` | No result (no Sharpe returned), or a failing test with Sharpe under 50% of the limit | Drop it |
 | `submitted` | ACTIVE or decommissioned on BRAIN | Nothing |
 
@@ -636,6 +652,7 @@ BRAIN's *Consultant Do's and Don'ts* lists "using automation to generate Alpha i
 | Alpha Autopilot, Dashboard | **Plan next task**, **Resume Autopilot** or **Run now** in Full Autopilot | The planned tasks start at once, within the cap |
 | Tasks, Sync with BRAIN | **Resume queue**, **Continue** (after verification) | Whatever was already queued |
 | Alpha details | **Optimise** | Up to 11 |
+| Tasks, Alphas, Alpha details | **Repair near misses…**, **Repair selected…**, **Repair…** | Up to the budget you set (150 by default) |
 | Super Alphas | **Simulate SuperAlpha** | 1, sent directly (not held back by the reserve or **Stop all**) |
 
 ### Buttons that change your BRAIN account
@@ -722,6 +739,8 @@ Advanced settings live in `%APPDATA%\AlphaGo\settings.json`, created the first t
 | Anything else | Read `%APPDATA%\AlphaGo\logs\alphago.log` |
 
 ### Frequently asked questions
+
+**Why do I have strong alphas but nothing Ready?** Open **Quota Planner**: **Why no Ready yet?** says what is holding them back. A strong alpha passes every simulation test, but Ready needs BRAIN's full check, which adds self- and production correlation. Press **Check all strong** on **Alphas** (it costs no simulations), then start **Repair near misses…** on **Tasks**. No optimiser can promise Ready: an idea with no real edge cannot be repaired, and correlation is the hardest failure to fix. When every useful move has been tried, **Repair plan** says so and the alpha leaves the queue.
 
 **Does AlphaGo ever submit by itself?** No, in no mode, including Full Autopilot. Every submission starts with your click on **Submit to BRAIN**. The only way to repeat one without the dialog is **Retry selected** on its Submit job in **Tasks**, which re-sends that same confirmed submission.
 

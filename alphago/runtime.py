@@ -143,12 +143,13 @@ async def startup() -> None:
     from .engine.research import daily_scheduler, research
     await research.restore()                # tasks interrupted by a restart wait for the user
     await _close_stale_runs()
-    from .engine.actions import rederive_check_states
+    from .engine.actions import recheck_loop, rederive_check_states
     await rederive_check_states()
     await jobs.start()
     _tasks.append(asyncio.create_task(try_auto_login(), name="auto-login"))
     _tasks.append(asyncio.create_task(_keepalive(), name="keepalive"))
     _tasks.append(asyncio.create_task(daily_scheduler(), name="daily-scheduler"))
+    _tasks.append(asyncio.create_task(recheck_loop(), name="recheck"))
     from .background import keep_awake_loop
     alerts.install()
     _tasks.append(asyncio.create_task(health.flush_loop(), name="health-flush"))

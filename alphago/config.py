@@ -105,6 +105,7 @@ class ResearchSettings(BaseModel):
     optimize_share: float = 0.2       # share of a task's planned simulations reserved for repairing near misses
     repair_depth: int = 3             # rounds of stacked fixes per near miss
     check_cap: int = 15               # BRAIN /check runs per task or batch (a check costs no simulation quota)
+    repair_task_sims: int = 150       # default budget of a "Repair near misses" task
     duplicate_filter: bool = True     # leave out exact shape+field copies of your submitted alphas before simulating
     cluster_share: float = 0.4        # max share of the day's simulations per economic idea (0 = no cap)
     cluster_min: int = 150            # ... but never cap an idea below this many simulations a day

@@ -90,13 +90,19 @@ async def search_size(alpha_id: str) -> SearchSize:
     async with db.session() as s:
         a = await s.get(Alpha, alpha_id)
         cand = await s.get(Candidate, a.candidate_id) if a and a.candidate_id else None
+        root = (cand.rationale or {}).get("root") if cand is not None else None
+        if root and root != alpha_id:      # a repair belongs to the search that found its root, whichever task ran it
+            first_row = await s.get(Alpha, root)
+            found = await s.get(Candidate, first_row.candidate_id) if first_row and first_row.candidate_id else None
+            if found is not None and (found.task_id is not None or found.batch_id is not None):
+                cand = found
         if cand is None or (cand.task_id is None and cand.batch_id is None):
             return SearchSize(1, 1, [a.sharpe] if a and a.sharpe is not None else [])
         col, key = (Candidate.task_id, cand.task_id) if cand.task_id is not None else (Candidate.batch_id,
                                                                                       cand.batch_id)
         rows = (await s.execute(select(Candidate.origin, Alpha.sharpe).join(Alpha, Alpha.id == Candidate.alpha_id)
                                 .where(col == key, Candidate.status.in_(["done", "reused"])))).all()
-    first = [sh for origin, sh in rows if origin not in ("optimize", "robustness")]
+    first = [sh for origin, sh in rows if origin not in ("optimize", "robustness", "seed")]
     return SearchSize(len(rows), max(1, len(first)), [sh for sh in first if sh is not None])
 
 

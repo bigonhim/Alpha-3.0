@@ -176,6 +176,7 @@ class ResearchTask(Base):
     delay: Mapped[int] = mapped_column(Integer)
     universe: Mapped[str] = mapped_column(String(32))
     dataset_ids: Mapped[Any] = mapped_column(JSON, nullable=True)
+    alpha_ids: Mapped[Any] = mapped_column(JSON, nullable=True)           # repair task: only these alphas (None = all)
     theme: Mapped[str | None] = mapped_column(String(64))
     reason: Mapped[str | None] = mapped_column(Text)
     planned_sims: Mapped[int] = mapped_column(Integer, default=500)
@@ -320,6 +321,9 @@ class Alpha(Base):
     os_retention_pred: Mapped[float | None] = mapped_column(Float)      # predicted OS/IS Sharpe from your history
     cluster: Mapped[str | None] = mapped_column(String(32))             # economic idea (momentum, value, ...)
     expanded_at: Mapped[datetime | None] = mapped_column(UTCDateTime)   # the repair loop expanded this alpha
+    check_tries: Mapped[int | None] = mapped_column(Integer)            # /check replies in a row without an answer
+    repair_state: Mapped[str | None] = mapped_column(String(16))        # exhausted = no untried move can help
+    repair_note: Mapped[str | None] = mapped_column(Text)               # why, in a sentence
 
 
 class OptimizationAttempt(Base):
@@ -341,6 +345,7 @@ class OptimizationAttempt(Base):
     child_score: Mapped[float | None] = mapped_column(Float)
     outcome: Mapped[str | None] = mapped_column(String(16))             # success | failure | neutral
     resolved_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
+    cause: Mapped[str | None] = mapped_column(String(24))               # root cause the move answered (turnover, ...)
 
 
 class Submission(Base):

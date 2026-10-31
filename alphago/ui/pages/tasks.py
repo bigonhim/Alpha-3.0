@@ -10,7 +10,7 @@ from ...config import settings
 from ...db import db
 from ...db.models import Alpha, Candidate, Job
 from ...engine.datasets import rated_datasets
-from ...engine.research import KINDS, research, task_label
+from ...engine.research import SEARCH_KINDS, research, task_label
 from ...engine.simulator import simulator
 from ...jobs.queue import jobs
 from ..alpha_detail import open_alpha
@@ -61,7 +61,7 @@ async def new_task_dialog(scope: dict | None = None, dataset_ids: list[str] | No
     sc = scope or {"region": r.region, "delay": r.delay, "universe": r.universe}
     with ui.dialog() as d, ui.card().classes("ag-card p-6 w-[640px]"):
         ui.label("New research task").classes("text-lg font-semibold")
-        k = ui.select({k: v for k, v in KINDS.items()}, value=kind if kind in KINDS else "single",
+        k = ui.select(dict(SEARCH_KINDS), value=kind if kind in SEARCH_KINDS else "single",
                       label="Kind").classes("w-full")
         with ui.row().classes("gap-2 w-full no-wrap"):
             region = ui.select(opts.regions, value=sc["region"] if sc["region"] in opts.regions else opts.regions[0],
@@ -123,6 +123,52 @@ async def new_task_dialog(scope: dict | None = None, dataset_ids: list[str] | No
     d.open()
 
 
+async def repair_dialog(alpha_ids: list[str] | None = None, scope: dict | None = None, on_done=None) -> None:  # noqa: ANN001
+    """Start a "Repair near misses" task: on the alphas you picked, or on every strong and near-miss alpha in a scope."""
+    opts = brain.options
+    r = settings.research
+    sc = scope or {"region": r.region, "delay": r.delay, "universe": r.universe}
+    with ui.dialog() as d, ui.card().classes("ag-card p-6 w-[560px]"):
+        ui.label("Repair near misses").classes("text-lg font-semibold")
+        ui.label(f"Works on the {len(alpha_ids)} alpha(s) you selected." if alpha_ids else
+                 "Works on every strong and near-miss alpha in this scope, closest to passing first.").classes(
+            "ag-muted text-sm")
+        with ui.row().classes("gap-2 w-full no-wrap"):
+            region = ui.select(opts.regions, value=sc["region"] if sc["region"] in opts.regions else opts.regions[0],
+                               label="Region").classes("w-28")
+            delay = ui.select(opts.delays(region.value), value=sc["delay"] if sc["delay"] in opts.delays(region.value)
+                              else opts.delays(region.value)[0], label="Delay").classes("w-24")
+            universe = ui.select(opts.universes(region.value), label="Universe",
+                                 value=sc["universe"] if sc["universe"] in opts.universes(region.value)
+                                 else opts.universes(region.value)[0]).classes("grow")
+        for el in (region, delay, universe):
+            el.set_enabled(not alpha_ids)
+        with ui.row().classes("gap-3"):
+            sims = ui.number("Simulations", value=r.repair_task_sims, min=10, step=10).classes("w-36")
+            cores = ui.number("Cores (of 8)", value=r.task_cores, min=1, max=8).classes("w-32")
+        ui.label("Spends up to this many simulations from your daily quota; BRAIN's check costs none. Pause or stop it "
+                 "any time on Tasks. Nothing is ever submitted.").classes("ag-muted text-xs")
+
+        async def create() -> None:
+            try:
+                tid = await research.create(kind="repair", region=region.value, delay=int(delay.value),
+                                            universe=universe.value, dataset_ids=[], alpha_ids=alpha_ids,
+                                            planned_sims=int(sims.value or 0), cores=int(cores.value or 1),
+                                            source="manual", status="queued", reason="Started by you.")
+                await research.start(tid)
+                d.close()
+                ui.notify(f"Repair task #{tid} started — follow it on Tasks.", type="positive")
+                if on_done:
+                    await on_done()
+            except Exception as exc:
+                notify_error(exc)
+
+        with ui.row().classes("justify-end w-full"):
+            ui.button("Cancel", on_click=d.close).props("flat")
+            ui.button("Start repair", icon="healing", on_click=create).props("color=primary")
+    d.open()
+
+
 async def page() -> None:
     with ui.row().classes("w-full items-start no-wrap"):
         page_header("Tasks", "Research tasks share BRAIN's concurrent simulation slots (cores). Pause, stop or delete "
@@ -169,6 +215,8 @@ async def page() -> None:
             ui.space()
             ui.button("New task…", icon="add", on_click=lambda: new_task_dialog(on_done=lambda: refresh(True))).props(
                 "dense")
+            ui.button("Repair near misses…", icon="healing",
+                      on_click=lambda: repair_dialog(on_done=lambda: refresh(True))).props("dense outline")
             ui.button("Approve", icon="check", on_click=lambda: act("approve")).props("flat dense")
             ui.button("Pause", icon="pause", on_click=lambda: act("pause")).props("flat dense")
             ui.button("Resume", icon="play_arrow", on_click=lambda: act("resume")).props("flat dense")

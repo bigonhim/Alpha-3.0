@@ -49,6 +49,9 @@ In-sample: Sharpe {{ sharpe }}, Fitness {{ fitness }}, Turnover {{ turnover }}, 
 Drawdown {{ drawdown }}, Margin {{ margin }}
 Failing / warning checks (value vs BRAIN's limit):
 {{ failing }}
+{% if prescription %}Measured diagnosis — fix these causes and hit these numbers, do not make general improvements:
+{{ prescription }}
+{% endif %}
 {% if tried %}Fixes already tried on this alpha or its parents, with what happened (do NOT repeat these):
 {{ tried }}
 {% endif %}

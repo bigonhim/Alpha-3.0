@@ -2,23 +2,30 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from sqlalchemy import func, select
 
 from ..brain import brain
+from ..brain.errors import BrainError
 from ..brain.quota import EASTERN
 from ..config import settings
 from ..db import db
 from ..db.models import Alpha, Submission
 from ..events import bus
 from ..jobs.queue import JobContext, jobs
-from .evaluator import blocking_failures, check_state_of, reverdict
+from .evaluator import blocking_failures, check_state_of, pending_checks, reverdict
 from .ingest import upsert_alpha
 
 log = logging.getLogger(__name__)
+
+PENDING_POLLS = 3            # /check answers still PENDING: ask this many more times before giving up for now
+PENDING_WAIT_S = 20.0
+MAX_CHECK_TRIES = 3          # unanswered /check results re-asked before the alpha waits for you
+RECHECK_AFTER = timedelta(minutes=30)
 
 
 def utcnow() -> datetime:
@@ -31,9 +38,28 @@ async def refresh_alpha(alpha_id: str) -> Alpha:
 
 
 async def run_check(alpha_id: str) -> tuple[str, list[dict[str, Any]]]:
-    """Run BRAIN's /check. Returns (check_state, checks). Marks the alpha 'ready' when everything passes."""
+    """Run BRAIN's /check. Returns (check_state, checks). Marks the alpha 'ready' when everything passes.
+
+    An unusable reply (no checks) changes nothing but the try count: an empty body must never read as a pass, and it
+    must not wipe an earlier result. Checks still PENDING are asked again a few times before returning."""
     bus.publish("check", f"Running submission check for {alpha_id}…")
     checks = await brain.alphas.check(alpha_id)
+    for _ in range(PENDING_POLLS):
+        if not checks or blocking_failures(checks) or not pending_checks(checks):
+            break
+        await asyncio.sleep(PENDING_WAIT_S)
+        checks = await brain.alphas.check(alpha_id)
+    if not checks:
+        async with db.write() as s:
+            row = await s.get(Alpha, alpha_id)
+            if row is not None:
+                row.check_tries = (row.check_tries or 0) + 1
+                row.checked_at = row.checked_at or utcnow()
+                row.check_state = row.check_state or "pending"
+                reverdict(row)
+        bus.publish("check", f"{alpha_id}: BRAIN's check returned no results — nothing changed; it will be asked "
+                             "again.", "warning")
+        return "pending", []
     # one rule for "blocking" (evaluator.NON_BLOCKING): an informational FAIL such as POWER_POOL_CORRELATION used to
     # mark the check failed while the verdict ignored it, so such an alpha could never become "ready"
     failing = blocking_failures(checks)
@@ -48,6 +74,7 @@ async def run_check(alpha_id: str) -> tuple[str, list[dict[str, Any]]]:
         row.checks = checks
         row.check_state = state
         row.checked_at = utcnow()
+        row.check_tries = (row.check_tries or 0) + 1 if state == "pending" else 0
         if self_corr is not None:
             row.self_corr = self_corr
         if prod_corr is not None:
@@ -118,23 +145,78 @@ async def mark_stale_after_submission(alpha_id: str) -> int:
 
 
 async def rederive_check_states() -> int:
-    """Re-read stored /check results with the current blocking rule. Before it was shared with the evaluator, an
-    informational FAIL (e.g. POWER_POOL_CORRELATION) marked the whole check failed, so such alphas never showed as
-    ready. Runs at startup; touches only alphas whose stored result now reads differently."""
+    """Re-read stored /check results with the current rules, so alphas an older rule left stuck come free. Runs at
+    startup; touches only alphas whose stored result now reads differently.
+
+    - an informational FAIL (POWER_POOL_CORRELATION) or a daily-limit check no longer fails the whole check;
+    - an ERROR is unanswered, not failed, so it goes back to pending;
+    - a "pass" stored from an empty /check reply was never a pass: the alpha goes back to its simulation's checks.
+    It never turns "pending" into "pass": a pending row can hold an older result, and only BRAIN can pass an alpha."""
     changed = 0
     async with db.write() as s:
-        rows = list(await s.scalars(select(Alpha).where(Alpha.check_state.in_(["fail", "pending"]),
+        rows = list(await s.scalars(select(Alpha).where(Alpha.check_state.in_(["fail", "pending", "pass"]),
                                                         Alpha.checked_at.is_not(None))))
         for row in rows:
+            if row.check_state == "pass" and row.checks:
+                continue
+            if row.check_state == "pass":
+                row.checks, row.check_state, row.checked_at = row.is_checks, None, None
+                reverdict(row)
+                changed += 1
+                continue
             state = check_state_of(row.checks)
-            if state != row.check_state:
+            if state != row.check_state and not (state == "pass" and row.check_state == "pending"):
                 row.check_state = state
                 reverdict(row)
                 changed += 1
     if changed:
-        bus.publish("check", f"{changed} alpha(s) re-read with the corrected check rule (informational checks no "
-                             "longer block 'ready').", "info")
+        bus.publish("check", f"{changed} alpha(s) re-read with the corrected check rules (informational checks and "
+                             "BRAIN errors no longer fail a check; empty results never pass).", "info")
     return changed
+
+
+async def recheck_due(limit: int = 5) -> list[str]:
+    """Alphas whose earlier /check is still unanswered and worth asking again: strong, not asked in the last half hour,
+    fewer than MAX_CHECK_TRIES unanswered replies. Only ever finishes a check that already started."""
+    cutoff = utcnow() - RECHECK_AFTER
+    async with db.session() as s:
+        return list(await s.scalars(select(Alpha.id).where(
+            Alpha.check_state == "pending", Alpha.verdict == "strong", Alpha.checked_at < cutoff,
+            (Alpha.check_tries.is_(None)) | (Alpha.check_tries < MAX_CHECK_TRIES))
+            .order_by(Alpha.checked_at).limit(limit)))
+
+
+async def recheck_loop(interval_s: float = 300.0) -> None:
+    """Background: finish checks BRAIN left unanswered. Costs no simulation quota, one call at a time, and sits out
+    while signed out or after Stop all. Separate from the daily scheduler, because one /check can take minutes."""
+    from .audit import ACTOR
+    from .simulator import simulator
+    ACTOR.set("recheck")
+    await asyncio.sleep(60)
+    while True:
+        try:
+            if brain.client.logged_in and not simulator.paused:
+                for alpha_id in await recheck_due():
+                    if not brain.client.logged_in or simulator.paused:
+                        break
+                    try:
+                        await run_check(alpha_id)
+                    except BrainError as exc:      # counts as a try, so a broken alpha cannot be asked forever
+                        log.info("re-check of %s failed: %s", alpha_id, exc.message)
+                        await _count_try(alpha_id)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("re-check sweep failed")
+        await asyncio.sleep(interval_s)
+
+
+async def _count_try(alpha_id: str) -> None:
+    async with db.write() as s:
+        row = await s.get(Alpha, alpha_id)
+        if row is not None:
+            row.check_tries = (row.check_tries or 0) + 1
+            row.checked_at = utcnow()
 
 
 async def submissions_today(kind: str = "REGULAR") -> int:

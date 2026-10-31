@@ -75,6 +75,61 @@ async def fake_env(tmp_path, monkeypatch):
     await db.close()
 
 
+@pytest.mark.parametrize("replies, state, verdict", [
+    (["pending", "pending", "done"], "pass", "ready"),     # BRAIN finishes while the app keeps asking
+    (["error", "done"], "pass", "ready"),                  # a passing glitch is asked again
+    (["empty"], "pending", "strong"),                      # a reply with no checks passes nothing
+])
+async def test_check_replies_through_the_real_client(fake_env, monkeypatch, replies, state, verdict) -> None:
+    from alphago.engine import actions
+    from alphago.engine.ingest import upsert_alpha
+    monkeypatch.setattr(actions, "PENDING_WAIT_S", 0.0)
+    fake = FakeBrain(lambda e, st: (1.6, 1.2, 0.2), check_replies=replies)
+    with respx.mock(assert_all_called=False) as router:
+        fake.install(router)
+        aid = fake._new_alpha({"regular": {"code": "rank(close)"}, "settings": {"region": "USA", "delay": 1}})
+        await upsert_alpha(fake.alphas[aid])
+        got, _ = await actions.run_check(aid)
+    async with db.session() as s:
+        a = await s.get(Alpha, aid)
+    assert got == state and a.check_state == state and a.verdict == verdict
+
+
+async def test_repair_task_against_mock_brain_reaches_ready(fake_env, monkeypatch) -> None:
+    """A near miss already in the database, a repair task, the real client: simulate, /check, Ready, nothing submitted."""
+    from alphago.engine import catalogs, research as research_mod
+    from alphago.engine.ingest import upsert_alpha
+    from alphago.engine.research import ResearchManager
+    from alphago.engine.simulator import SimulationService
+    from alphago.llm import gemini
+
+    catalogs.invalidate()
+    monkeypatch.setattr(gemini, "configure", lambda *a, **k: False)
+
+    def score(expr: str, st: dict) -> tuple[float, float, float]:
+        return (1.6, 1.2, 0.2) if int(st.get("decay") or 0) >= 1 else (1.4, 0.8, 0.3)
+
+    fake = FakeBrain(score, check_replies=["pending", "done"])
+    sim = SimulationService()
+    monkeypatch.setattr(research_mod, "simulator", sim)
+    monkeypatch.setattr("alphago.engine.refine.simulator", sim)
+    with respx.mock(assert_all_called=False) as router:
+        fake.install(router)
+        await brain.client.login("me@example.com", "pw")
+        aid = fake._new_alpha({"regular": {"code": "rank(close)"},
+                               "settings": {"region": "USA", "delay": 1, "universe": "TOP3000", "decay": 0}})
+        await upsert_alpha(fake.alphas[aid])
+        monkeypatch.setattr("alphago.engine.actions.PENDING_WAIT_S", 0.0)
+        await sim.start()
+        manager = ResearchManager()
+        tid = await manager.create(kind="repair", region="USA", delay=1, universe="TOP3000", dataset_ids=[],
+                                   planned_sims=20, cores=2)
+        await manager._run_inner(tid)
+        await sim.stop()
+    t = await manager.get(tid)
+    assert t.status == "complete" and t.n_ready >= 1 and fake.posted <= 20 and not fake.submitted
+
+
 def banded(expr: str, st: dict) -> tuple[float, float, float]:
     """Only one template on operating_income is a near miss; more decay repairs it (decay ≥ 6 passes)."""
     if not (expr.startswith("ts_rank(") and "operating_income" in expr and ", 66)" in expr):

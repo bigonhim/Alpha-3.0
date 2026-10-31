@@ -172,6 +172,7 @@ class SimulationService:
 
         hashes = [(canonical_hash(vr.program), settings_hash(st)) for _, st, vr in staged if vr.ok and vr.program]
         existing = await self._existing_alphas(hashes)
+        waiting = await self._in_flight(hashes) if any(sp.origin == "optimize" for sp, _, _ in staged) else set()
         history: dict[tuple[str, str, int], int] = {}
         if history_cap:
             skels = {(skeleton_hash(vr.program), st["region"], st["delay"]) for _, st, vr in staged
@@ -241,6 +242,10 @@ class SimulationService:
                 result.reused.append(cand)
                 result.leave("already simulated (result reused)")
                 continue
+            if spec.origin == "optimize" and (ch, sh) in waiting:     # no alpha id yet, so not "reused": never pay twice
+                result.skipped += 1
+                result.leave("already queued for simulation")
+                continue
             if spec.origin in GENERATED_ORIGINS and research.duplicate_filter:
                 if (region, delay) not in submitted:
                     submitted[(region, delay)] = await submitted_shapes(region, delay)
@@ -282,6 +287,19 @@ class SimulationService:
                         Candidate.canonical_hash.in_(chunk), Candidate.alpha_id.is_not(None)))).all():
                     if (ch, sh) in wanted:
                         out.setdefault((ch, sh), aid)
+        return out
+
+    async def _in_flight(self, hashes: list[tuple[str, str]]) -> set[tuple[str, str]]:
+        """(canonical hash, settings hash) pairs queued or simulating right now."""
+        wanted = set(hashes)
+        canon = sorted({c for c, _ in wanted})
+        out: set[tuple[str, str]] = set()
+        async with db.session() as s:
+            for i in range(0, len(canon), 400):
+                rows = (await s.execute(select(Candidate.canonical_hash, Candidate.settings_hash).where(
+                    Candidate.canonical_hash.in_(canon[i:i + 400]),
+                    Candidate.status.in_(["approved", "queued", "simulating"])))).all()
+                out |= {(ch, sh) for ch, sh in rows if (ch, sh) in wanted}
         return out
 
     async def _cluster_counts_today(self) -> dict[str, int]:
