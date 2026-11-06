@@ -18,8 +18,18 @@ from ...engine.describe import describe_alpha
 from ...engine.programs import PP_TAG, power_pool_eligibility
 from ...jobs.queue import jobs
 from ..alpha_detail import open_alpha
-from ..components import (card, grid_options, info_box, money_col, notify_error, num_col, page_header, segmented,
-                          sparkline_col, stat_tile)
+from ..components import (
+    card,
+    grid_options,
+    info_box,
+    money_col,
+    notify_error,
+    num_col,
+    page_header,
+    segmented,
+    sparkline_col,
+    stat_tile,
+)
 
 RATING_RENDER = """params => {
   const k = {very_good: 'pass', good: 'running', average: 'pending', weak: 'fail'}[params.data.rating] || '';

@@ -425,7 +425,7 @@ class SimulationService:
         while True:
             try:
                 await asyncio.wait_for(self._wake.wait(), timeout=2.0)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 pass
             self._wake.clear()
             try:

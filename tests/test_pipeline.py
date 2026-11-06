@@ -9,6 +9,7 @@ import json
 import httpx
 import pytest
 import respx
+from sqlalchemy import select
 
 from alphago.brain import brain
 from alphago.brain import client as client_mod
@@ -18,7 +19,6 @@ from alphago.db.models import Alpha, Candidate
 from alphago.engine.evaluator import evaluate
 from alphago.engine.optimizer import plan_variants
 from alphago.engine.simulator import CandidateSpec, SimulationService
-from sqlalchemy import select
 
 API = "https://api.worldquantbrain.com"
 AUTH = {"user": {"id": "U1"}, "token": {"expiry": 14400.0}, "permissions": []}

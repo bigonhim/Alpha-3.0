@@ -12,8 +12,17 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from ..brain.simulations import normalize_settings
 from ..db import db
-from ..db.models import (Alpha, Candidate, DataField, Dataset, DatasetInsight, DatasetRating, OptimizationAttempt,
-                          Pyramid, utcnow)
+from ..db.models import (
+    Alpha,
+    Candidate,
+    DataField,
+    Dataset,
+    DatasetInsight,
+    DatasetRating,
+    OptimizationAttempt,
+    Pyramid,
+    utcnow,
+)
 from ..events import bus
 from ..jobs.queue import JobContext, jobs
 from ..knowledge import pack

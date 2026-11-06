@@ -7,10 +7,18 @@ from ..credentials import brain_credentials
 from .alphas import AlphasAPI, SubmitResult, check_failures, parse_checks
 from .client import BrainClient
 from .data import DataAPI
-from .errors import (AuthError, BrainError, ConcurrencyLimit, PersonaRequired, QuotaExhausted, SimulationRejected)
+from .errors import AuthError, BrainError, ConcurrencyLimit, PersonaRequired, QuotaExhausted, SimulationRejected
 from .options import SimOptions
-from .simulations import (DEFAULT_SETTINGS, SimOutcome, SimulationAPI, group_key, normalize_settings,
-                          regular_payload, settings_hash, super_payload)
+from .simulations import (
+    DEFAULT_SETTINGS,
+    SimOutcome,
+    SimulationAPI,
+    group_key,
+    normalize_settings,
+    regular_payload,
+    settings_hash,
+    super_payload,
+)
 from .users import UsersAPI
 
 

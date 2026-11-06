@@ -381,7 +381,8 @@ async def test_dataset_yield_rewards_alphas_that_pass_brains_check(dbenv) -> Non
 
 async def test_research_task_repairs_and_certifies_within_budget(dbenv, monkeypatch) -> None:
     from alphago.db.models import DataField
-    from alphago.engine import catalogs, research as research_mod
+    from alphago.engine import catalogs
+    from alphago.engine import research as research_mod
     from alphago.engine.research import research
     from alphago.llm import gemini
 

@@ -20,7 +20,7 @@ from alphago.brain import client as client_mod
 from alphago.brain import simulations as sims_mod
 from alphago.brain.alphas import _records
 from alphago.db import db
-from alphago.db.models import Alpha, Candidate, Dataset, DataField
+from alphago.db.models import Alpha, Candidate, DataField, Dataset
 from alphago.engine import pnl
 from alphago.engine.evaluator import check_state_of
 from alphago.engine.ingest import apply_alpha_json
@@ -97,7 +97,8 @@ async def test_check_replies_through_the_real_client(fake_env, monkeypatch, repl
 
 async def test_repair_task_against_mock_brain_reaches_ready(fake_env, monkeypatch) -> None:
     """A near miss already in the database, a repair task, the real client: simulate, /check, Ready, nothing submitted."""
-    from alphago.engine import catalogs, research as research_mod
+    from alphago.engine import catalogs
+    from alphago.engine import research as research_mod
     from alphago.engine.ingest import upsert_alpha
     from alphago.engine.research import ResearchManager
     from alphago.engine.simulator import SimulationService

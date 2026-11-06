@@ -150,7 +150,8 @@ class Batch(Base):
     delay: Mapped[int | None] = mapped_column(Integer)
     dataset_id: Mapped[str | None] = mapped_column(String(64))
     strategy: Mapped[str | None] = mapped_column(String(64))
-    status: Mapped[str] = mapped_column(String(16), default="pending")   # pending | awaiting_approval | running | done | halted
+    # pending | awaiting_approval | running | done | halted
+    status: Mapped[str] = mapped_column(String(16), default="pending")
     n_generated: Mapped[int] = mapped_column(Integer, default=0)
     n_valid: Mapped[int] = mapped_column(Integer, default=0)
     n_simulated: Mapped[int] = mapped_column(Integer, default=0)
@@ -183,7 +184,8 @@ class ResearchTask(Base):
     cores: Mapped[int] = mapped_column(Integer, default=4)
     status: Mapped[str] = mapped_column(String(16), default="planned", index=True)
     # planned | queued | running | paused | complete | stopped | skipped | failed
-    stage: Mapped[str | None] = mapped_column(String(16))                 # analyzing | generating | simulating | optimizing | completed
+    # analyzing | generating | simulating | optimizing | completed
+    stage: Mapped[str | None] = mapped_column(String(16))
     plan_day: Mapped[str | None] = mapped_column(String(10), index=True)  # BRAIN (US/Eastern) day it was planned for
     n_generated: Mapped[int] = mapped_column(Integer, default=0)
     n_simulated: Mapped[int] = mapped_column(Integer, default=0)
@@ -211,7 +213,8 @@ class Candidate(Base):
     settings_hash: Mapped[str] = mapped_column(String(32))
     region: Mapped[str] = mapped_column(String(16))
     delay: Mapped[int] = mapped_column(Integer)
-    origin: Mapped[str] = mapped_column(String(32), default="manual")   # llm | template | mutation | optimize | manual | matrix | spc
+    # llm | template | mutation | optimize | manual | matrix | spc
+    origin: Mapped[str] = mapped_column(String(32), default="manual")
     parent_id: Mapped[int | None] = mapped_column(Integer)
     parent_alpha_id: Mapped[str | None] = mapped_column(String(32))
     batch_id: Mapped[int | None] = mapped_column(ForeignKey("batches.id"), index=True)
@@ -296,7 +299,8 @@ class Alpha(Base):
     prod_corr: Mapped[float | None] = mapped_column(Float)
     os: Mapped[Any] = mapped_column(JSON, nullable=True)
     os_sharpe: Mapped[float | None] = mapped_column(Float)
-    verdict: Mapped[str | None] = mapped_column(String(16), index=True)  # rejected | weak | promising | strong | ready | submitted
+    # rejected | weak | promising | strong | ready | submitted
+    verdict: Mapped[str | None] = mapped_column(String(16), index=True)
     score: Mapped[float | None] = mapped_column(Float)
     origin: Mapped[str] = mapped_column(String(16), default="app")      # app | synced
     canonical_hash: Mapped[str | None] = mapped_column(String(32), index=True)
@@ -309,7 +313,8 @@ class Alpha(Base):
     raw: Mapped[Any] = mapped_column(JSON, nullable=True)
     updated_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow, onupdate=utcnow)
     # --- research quality (all nullable: added to existing databases by the forward-only migration)
-    is_checks: Mapped[Any] = mapped_column(JSON, nullable=True)         # the simulation's own IS checks (/check overwrites `checks`)
+    # the simulation's own IS checks (/check overwrites `checks`)
+    is_checks: Mapped[Any] = mapped_column(JSON, nullable=True)
     robust_ratio: Mapped[float | None] = mapped_column(Float)           # worst neighbour Sharpe / Sharpe
     robust_state: Mapped[str | None] = mapped_column(String(16))        # robust | fragile | unknown
     est_self_corr: Mapped[float | None] = mapped_column(Float)          # local estimate from daily PnL vs submitted alphas
@@ -441,7 +446,8 @@ class Job(Base):
     kind: Mapped[str] = mapped_column(String(48))
     title: Mapped[str] = mapped_column(String(256))
     params: Mapped[Any] = mapped_column(JSON, nullable=True)
-    status: Mapped[str] = mapped_column(String(16), default="queued", index=True)  # queued | running | done | failed | cancelled
+    # queued | running | done | failed | cancelled
+    status: Mapped[str] = mapped_column(String(16), default="queued", index=True)
     progress: Mapped[float] = mapped_column(Float, default=0.0)
     message: Mapped[str | None] = mapped_column(Text)
     priority: Mapped[int] = mapped_column(Integer, default=5)

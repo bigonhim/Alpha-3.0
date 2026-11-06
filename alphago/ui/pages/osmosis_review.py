@@ -15,8 +15,18 @@ from ...db.models import Alpha, ConsultantSnapshot, OsmosisAllocation
 from ...engine import portfolio
 from ...engine.sync import last_synced
 from ...jobs.queue import jobs
-from ..components import (card, fmt_int, fmt_num, grid_options, info_box, lang_toggle, notify_error, num_col,
-                          page_header, stat_tile)
+from ..components import (
+    card,
+    fmt_int,
+    fmt_num,
+    grid_options,
+    info_box,
+    lang_toggle,
+    notify_error,
+    num_col,
+    page_header,
+    stat_tile,
+)
 
 
 async def page() -> None:
@@ -59,7 +69,8 @@ async def page() -> None:
     # ------------------------------------------------------------ prediction
     with card("w-full"):
         ui.label("Prediction: your next Osmosis result").classes("ag-section-title")
-        ui.label("Type the Osmosis score BRAIN shows you now. Your AI model, acting as a quant finance expert, looks at the points "
+        ui.label("Type the Osmosis score BRAIN shows you now. Your AI model, acting as a quant finance expert, looks at "
+                 "the points "
                  "on BRAIN now and predicts your next Osmosis result. It is an estimate from in-sample data, not a "
                  "promise. Only numbers are sent, never expressions.").classes("ag-muted text-sm")
         with ui.row().classes("items-center gap-3 mt-2"):

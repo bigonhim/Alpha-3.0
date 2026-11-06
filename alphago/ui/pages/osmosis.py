@@ -17,8 +17,20 @@ from ...engine import pnl, portfolio
 from ...engine.programs import next_osmosis_lock
 from ...engine.sync import last_synced
 from ...jobs.queue import jobs
-from ..components import (ago, badge, card, fmt_int, fmt_num, grid_options, notify_error, num_col, page_header,
-                          segmented, sparkline_col, stat_tile)
+from ..components import (
+    ago,
+    badge,
+    card,
+    fmt_int,
+    fmt_num,
+    grid_options,
+    notify_error,
+    num_col,
+    page_header,
+    segmented,
+    sparkline_col,
+    stat_tile,
+)
 
 METHODS = {"risk": "Equal risk (default)", "score": "Quality-weighted", "kelly": "Half-Kelly (Chan)",
            "inverse_corr": "Inverse correlation", "equal": "Equal points"}

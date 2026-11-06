@@ -9,7 +9,8 @@ from alphago.db import db
 from alphago.db.models import Alpha
 
 PAGES = [
-    ("/health", ["AI provider errors per day", "Which repairs work", "Self-correlation estimate vs BRAIN"]),
+    ("/health", ["BRAIN request pacing (live)", "Template families that work for you", "AI provider errors per day",
+                 "Which repairs work", "Self-correlation estimate vs BRAIN"]),
     ("/audit", ["Read-only record", "Simulations, last 30 days"]),
     ("/planner", ["Suggested split", "How to read it", "Why no Ready yet?", "Copy report", "Never checked"]),
     ("/tasks", ["Repair near misses…", "New task…"]),
@@ -20,6 +21,8 @@ PAGES = [
     ("/autopilot", ["Robustness test"]),
     ("/alphas", ["BRAIN check", "Robust", "Check all strong", "Repair selected…"]),
     ("/datasets", ["Dataset Intelligence"]),
+    ("/aqp", ["Alpha Quality Project", "Eligible alphas", "Write & grade with AI"]),
+    ("/spc", ["3. Generate, verify & submit", "Submit to BRAIN", "BRAIN submission endpoint and gates"]),
     ("/", ["Submittable Alphas"]),
 ]
 

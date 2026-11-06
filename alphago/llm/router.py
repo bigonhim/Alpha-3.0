@@ -21,12 +21,15 @@ from .claude import claude
 from .gemini import gemini
 from .ollama import ollama
 from .openai_compat import openai_provider
+from .openrouter import openrouter
 
 T = TypeVar("T", bound=BaseModel)
 
-PROVIDERS: dict[str, Any] = {"gemini": gemini, "claude": claude, "openai": openai_provider, "ollama": ollama}
+PROVIDERS: dict[str, Any] = {"gemini": gemini, "claude": claude, "openai": openai_provider,
+                             "openrouter": openrouter, "ollama": ollama}
 PROVIDER_LABELS = {"gemini": "Gemini (Google AI Studio)", "claude": "Claude (Anthropic)",
-                   "openai": "OpenAI / compatible", "ollama": "Ollama (local)"}
+                   "openai": "OpenAI / compatible", "openrouter": "OpenRouter (free models)",
+                   "ollama": "Ollama (local)"}
 FAILOVER_COOLDOWN = 600.0
 FAILOVER_CODES = (None, 404, 408, 429, 500, 502, 503, 504, 529)
 

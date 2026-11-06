@@ -8,7 +8,8 @@ from sqlalchemy import select
 
 from alphago.db import db
 from alphago.db.models import Alpha, Candidate
-from alphago.engine import actions, decorrelate as deco, refine
+from alphago.engine import actions, refine
+from alphago.engine import decorrelate as deco
 from alphago.engine.decorrelate import Collision, find_collision
 
 from .test_refine import BASE, FakeSim, add_alpha, checks_for, dbenv  # noqa: F401
@@ -169,7 +170,8 @@ def stub_full_check(monkeypatch, sim: CorrSim) -> list[str]:  # noqa: ANN001
 
 async def test_decorrelation_walks_down_over_rounds(dbenv, monkeypatch) -> None:  # noqa: F811
     """A round lowers the correlation without clearing it; the next starts from that child (old: one round, stop)."""
-    sim = CorrSim(lambda code, st: 0.6 if code.count("regression_neut") else 0.75 if st.get("neutralization") != "SUBINDUSTRY" else 0.85)
+    sim = CorrSim(lambda code, st: 0.6 if code.count("regression_neut")
+                  else 0.75 if st.get("neutralization") != "SUBINDUSTRY" else 0.85)
 
     def corr(code, st):  # noqa: ANN001, ANN202
         return sim.corr(code, st)

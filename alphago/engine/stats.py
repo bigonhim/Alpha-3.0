@@ -10,8 +10,17 @@ from sqlalchemy import case, func, select
 from ..brain import brain
 from ..brain.quota import EASTERN
 from ..db import db
-from ..db.models import (Alpha, Candidate, DataField, Dataset, DatasetInsight, JournalEntry, LLMCall,
-                         OptimizationAttempt, Submission)
+from ..db.models import (
+    Alpha,
+    Candidate,
+    DataField,
+    Dataset,
+    DatasetInsight,
+    JournalEntry,
+    LLMCall,
+    OptimizationAttempt,
+    Submission,
+)
 from .simulator import GENERATED_ORIGINS
 
 GOOD = ["promising", "strong", "ready", "submitted"]

@@ -34,8 +34,21 @@ from ..config import settings as app_settings
 from ..db import db
 from ..db.models import Alpha, Candidate, DataField, OptimizationAttempt
 from ..events import bus
-from ..fastexpr import (Call, Num, add_backfill, inline, negate, num, parse, replace_identifier, scale_windows,
-                        trade_when_wrap, transform, validate, wrap)
+from ..fastexpr import (
+    Call,
+    Num,
+    add_backfill,
+    inline,
+    negate,
+    num,
+    parse,
+    replace_identifier,
+    scale_windows,
+    trade_when_wrap,
+    transform,
+    validate,
+    wrap,
+)
 from . import playbook
 from .catalogs import get_catalog
 from .evaluator import CORRELATION_CHECKS, blocking_failures, check_map, evaluate, limits_for
@@ -932,7 +945,7 @@ async def _wait(ids: list[int], ctx: RefineContext) -> None:
         return
     try:
         await simulator.wait_for(ids, timeout=ctx.wait_timeout)
-    except asyncio.TimeoutError:
+    except TimeoutError:
         log.warning("repair round: %d simulations still unfinished after %.0f s", len(ids), ctx.wait_timeout or 0)
 
 
@@ -1068,7 +1081,7 @@ async def refine(seeds: list[Alpha], ctx: RefineContext) -> RefineReport:
 
 
 async def best_first(seeds: list[Alpha], ctx: RefineContext, *,
-                     check: Callable[[list[str]], Awaitable["CertifyReport"]] | None = None,
+                     check: Callable[[list[str]], Awaitable[CertifyReport]] | None = None,
                      on_round: Callable[[], Awaitable[None]] | None = None, width: int = 3,
                      fanout: int = 4) -> RefineReport:
     """Spend one budget across many near misses where it is likeliest to finish: each round takes the few alphas nearest
@@ -1322,7 +1335,7 @@ async def check_robustness(alpha_id: str, bid: int | None = None, task_id: int |
     ids = [c.id for c in result.created + result.reused]
     try:
         await simulator.wait_for(ids, timeout=6 * 3600)
-    except asyncio.TimeoutError:
+    except TimeoutError:
         log.warning("robustness neighbours of %s did not finish", alpha_id)
     async with db.session() as s:
         alpha_ids = [x for x in await s.scalars(select(Candidate.alpha_id).where(Candidate.id.in_(ids))) if x]

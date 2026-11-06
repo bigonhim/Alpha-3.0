@@ -336,7 +336,8 @@ async def page() -> None:
         r = settings.research
         ap_badge.set_text("On" if r.auto_daily else "Off")
         ap_badge.classes(replace="ag-badge " + ("running" if r.auto_daily else "stopped"))
-        ap_line.set_text(f"{ {'manual': 'Manual', 'assisted': 'Assisted', 'autopilot': 'Full Autopilot'}.get(r.mode, r.mode)}"
+        mode_name = {"manual": "Manual", "assisted": "Assisted", "autopilot": "Full Autopilot"}.get(r.mode, r.mode)
+        ap_line.set_text(f"{mode_name}"
                          f" · {r.region} D{r.delay} {r.universe} · focus {r.research_focus or 'automatic'} · "
                          f"{r.tasks_per_day} task(s)/day, {r.task_sims} simulations each")
         if force or state["rv"] != research.version:

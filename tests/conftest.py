@@ -74,5 +74,7 @@ def _no_real_brain_or_network(monkeypatch):
     brain.client.slots = SlotManager(brain.client.cfg.max_slots)
     brain.client._http = None
     brain.client.observers.clear()
+    from alphago.brain.ratelimit import RateGate
+    brain.client.gate = RateGate(0)           # unpaced in tests (tests of the pacing make their own gate)
     db._write_lock = asyncio.Lock()
     yield

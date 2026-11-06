@@ -19,13 +19,19 @@ from ..components import card, fmt_int, notify_error, page_header
 
 _KEY_LABEL = {"gemini": "Gemini API key (from aistudio.google.com)",
               "claude": "Anthropic API key (from console.anthropic.com)",
-              "openai": "API key (leave empty for a local server that needs none)"}
+              "openai": "API key (leave empty for a local server that needs none)",
+              "openrouter": "OpenRouter API key (from openrouter.ai/keys — free models need a key too)"}
 _URL_LABEL = {"openai": "Server URL (OpenAI, or OpenRouter, Groq, DeepSeek, LM Studio, vLLM …)",
-              "ollama": "Ollama server URL"}
+              "ollama": "Ollama server URL",
+              "openrouter": "OpenRouter URL"}
 _ROLE_HELP = {"gemini": ("fast 'flash' model", "strongest model", "cheapest model"),
               "claude": ("auto: Claude Opus 5.5 — Sonnet 5.5 / Haiku 5.5 cost less",) * 3,
               "openai": ("any chat model the server lists",) * 3,
+              "openrouter": ("auto: best-ranked healthy free model (re-ranked live, rotates on 429/404)",) * 3,
               "ollama": ("auto: first installed model",) * 3}
+
+
+TYPED = ("openai", "ollama", "openrouter")      # providers where a model name may be typed in
 
 
 def _role_cfg(provider: str):  # noqa: ANN202
@@ -35,8 +41,9 @@ def _role_cfg(provider: str):  # noqa: ANN202
 
 async def page() -> None:
     page_header("LLM Integration", "Choose the AI provider — Google Gemini, Anthropic Claude, OpenAI (or any "
-                                   "OpenAI-compatible server) or a local Ollama model. Keys are stored in Windows "
-                                   "Credential Manager; cloud rate limits are learned automatically from 429 responses.")
+                                   "OpenAI-compatible server), OpenRouter's free models or a local Ollama model. Keys "
+                                   "are stored in Windows Credential Manager; cloud rate limits are learned "
+                                   "automatically from 429 responses.")
     cfg = settings.llm
 
     with ui.row().classes("w-full gap-5 items-stretch no-wrap"):
@@ -59,6 +66,16 @@ async def page() -> None:
                         key_in = ui.input(_KEY_LABEL[name], password=True, password_toggle_button=True,
                                           placeholder="●●●●●●●● saved" if credentials.llm_key(name) else "").classes(
                             "w-full")
+                    if name == "openrouter":
+                        free_sw = ui.switch("Free models only", value=cfg.openrouter.free_only)
+                        free_sw.on_value_change(lambda e: (setattr(cfg.openrouter, "free_only", bool(e.value)),
+                                                           settings.save()))
+                        ui.label("The free line-up changes every few weeks, so it is read live from OpenRouter and "
+                                 "ranked (size, context, JSON support, retirement date and how each model behaved "
+                                 "here). Each call sends two backup models, and a model that is retired or "
+                                 "rate-limited is skipped automatically. Free use is capped per account per day "
+                                 "(about 50 requests, or 1,000 with $10 of credit); add a fallback provider for "
+                                 "when the cap is reached.").classes("ag-muted text-sm")
                     if name == "ollama":
                         ctx_in = ui.number("Context window (tokens)", value=cfg.ollama.num_ctx, min=2048,
                                            step=1024).classes("w-56")
@@ -110,11 +127,12 @@ async def page() -> None:
                         rc = _role_cfg(name)
                         names = [m["name"] for m in provider.models]
                         chosen = [getattr(rc, a) for a in ("ideation_model", "refine_model", "describe_model")]
-                        options = {"": "Auto"} | {n: n for n in names} | {c: c for c in chosen if c}
+                        options = {"": "Auto"} | {m["name"]: m.get("display") or m["name"] for m in provider.models}
+                        options |= {c: c for c in chosen if c and c not in names}
                         with models_box:
                             if not names:
                                 ui.label("Models appear here after a successful test." +
-                                         (" You can also type a model name." if name in ("openai", "ollama") else "")
+                                         (" You can also type a model name." if name in TYPED else "")
                                          ).classes("ag-muted text-sm")
                             for (role, attr), help_ in zip((("Ideation (bulk ideas)", "ideation_model"),
                                                             ("Refinement (near misses)", "refine_model"),
@@ -122,7 +140,7 @@ async def page() -> None:
                                 auto = provider.pick(attr.split("_")[0]) or "choose a model"
                                 sel = ui.select(options, value=getattr(rc, attr) if getattr(rc, attr) in options else "",
                                                 label=f"{role} — auto: {auto}", with_input=True,
-                                                new_value_mode="add-unique" if name in ("openai", "ollama") else None
+                                                new_value_mode="add-unique" if name in TYPED else None
                                                 ).classes("w-full")
                                 sel.on_value_change(lambda e, a=attr: (setattr(rc, a, e.value or ""), settings.save()))
                                 sel.tooltip(help_)
@@ -130,6 +148,10 @@ async def page() -> None:
                                                "off": "off (older models)"}, value=cfg.thinking_level,
                                               label="Thinking level (reasoning depth)").classes("w-64")
                             think.on_value_change(lambda e: (setattr(cfg, "thinking_level", e.value), settings.save()))
+                            if name == "openrouter" and provider.models:
+                                top = ", ".join(m["name"] for m in provider.models[:6])
+                                ui.label(f"{len(provider.models)} models ranked · top: {top}").classes(
+                                    "ag-muted text-xs")
 
                     render_models()
 

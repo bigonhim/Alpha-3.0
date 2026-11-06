@@ -22,7 +22,7 @@ log = logging.getLogger(__name__)
 
 
 class JobContext:
-    def __init__(self, job_id: int, queue: "JobQueue") -> None:
+    def __init__(self, job_id: int, queue: JobQueue) -> None:
         self.job_id = job_id
         self._queue = queue
         self.progress = 0.0

@@ -9,6 +9,12 @@ Kinds
                repairs of the near misses in scope, closest to passing first, until its budget ends. Runs only when
                you start it; the Autopilot never plans it.
 
+Field screening (settings.research.field_screening): a search task first spends one simulation per field (its
+time-series rank over the data category's main horizon), keeps the fields that showed a signal in either direction
+(a negative one is used sign-flipped) and spends the rest of its budget on those fields only. On a typical dataset
+most fields carry no usable signal, so this multiplies the share of simulations that reach "promising" or better.
+Templates are tried in the order your own history ranks their families (engine/families.py).
+
 A task runs in waves: generate → validate / de-duplicate (skipping shapes this market has already answered) →
 simulate on its cores → optimise near misses → BRAIN submission check on strong alphas → robustness gate.
 Submission is never automatic.
@@ -39,11 +45,23 @@ from ..config import settings
 from ..db import db
 from ..db.models import Alpha, Candidate, Dataset, DatasetRating, ResearchTask
 from ..events import bus
+from ..knowledge.templates import (
+    ENUM_WINDOWS,
+    PAIR_TEMPLATES,
+    PV_PARTNERS,
+    TEMPLATES,
+    enumerate_group,
+    enumerate_pairs,
+    enumerate_single,
+    probe_expression,
+    second_order,
+    settings_for_category,
+    windows_for_category,
+)
 from ..llm import llm
-from ..knowledge.templates import (PV_PARTNERS, enumerate_group, enumerate_pairs, enumerate_single, second_order,
-                                   settings_for_category)
-from .generators import dataset_fields
 from .evaluator import CORRELATION_CHECKS, blocking_failures
+from .families import family_stats, thompson_order
+from .generators import dataset_fields
 from .refine import RefineContext, best_first, certify, closest_first, refine, repair_spent
 from .simulator import CandidateSpec, simulator
 from .stats import brain_day_start
@@ -277,19 +295,81 @@ class ResearchManager:
             return list(await s.scalars(select(Alpha).where(Alpha.id.in_(ids), Alpha.verdict.in_(verdicts))
                                         .order_by(Alpha.score.desc().nulls_last()).limit(limit)))
 
-    def _expressions(self, t: ResearchTask, fields: dict[str, list[tuple[str, str]]]):  # noqa: ANN202
+    def _expressions(self, t: ResearchTask, fields: dict[str, list[tuple[str, str]]],  # noqa: ANN202
+                     windows: tuple[int, ...] = ENUM_WINDOWS, family_order: list[str] | None = None):
         ds = t.dataset_ids or []
         if t.kind == "single":
-            yield from enumerate_single(fields[ds[0]])
+            yield from enumerate_single(fields[ds[0]], windows=windows, family_order=family_order)
+            yield from enumerate_group(fields[ds[0]][:12], windows=windows[:3], family_order=family_order)
         elif t.kind == "pair":
             a, b = fields[ds[0]][:12], fields[ds[1]][:12]
-            yield from enumerate_pairs(a, b)
-            yield from enumerate_pairs(b, a)
+            yield from enumerate_pairs(a, b, windows=windows, family_order=family_order)
+            yield from enumerate_pairs(b, a, windows=windows, family_order=family_order)
         else:
             f = fields[ds[0]][:16]
-            yield from enumerate_pairs(f, f)
-            yield from enumerate_pairs(f, PV_PARTNERS)
-            yield from enumerate_group(f[:8])
+            yield from enumerate_pairs(f, f, windows=windows, family_order=family_order)
+            yield from enumerate_pairs(f, PV_PARTNERS, windows=windows, family_order=family_order)
+            yield from enumerate_group(f[:8], windows=windows[:3], family_order=family_order)
+
+    async def _screen_fields(self, t: ResearchTask, fields: dict[str, list[tuple[str, str]]], base: dict[str, Any],
+                             category: str | None, done_exprs: set[str], budget: int, left_out: Counter,
+                             generated: int) -> tuple[dict[str, list[tuple[str, str]]], int, list[int]]:
+        """Probe every field once; keep the ones with a signal (sign-flipped when it runs the wrong way).
+
+        Returns (screened fields per dataset, probes generated, candidate ids). Fields whose probe produced no result
+        are kept at the end of the list (they were not proven useless). Already-probed fields (a resumed task) are
+        read back from the database instead of being simulated again."""
+        r = settings.research
+        dataset_tag = ",".join(t.dataset_ids or [])
+        probes: dict[str, tuple[str, str, str]] = {}          # expression -> (dataset, field id, field type)
+        for d, flist in fields.items():
+            for fid, ftype in flist:
+                probes[probe_expression(fid, ftype, category)] = (d, fid, ftype)
+        todo = [e for e in probes if e not in done_exprs][:max(0, budget)]
+        ids: list[int] = []
+        if todo:
+            specs = [CandidateSpec(expression=e, settings=base, origin="search", dataset_id=dataset_tag,
+                                   task_id=t.id, hypothesis=f"{KINDS[t.kind]}: field screening",
+                                   rationale={"family": "ts_rank", "probe": True, "field": probes[e][1]})
+                     for e in todo]
+            done_exprs.update(todo)
+            res = await simulator.prepare(specs, initial_status="approved", task_id=t.id)
+            for k, v in res.left_out.items():
+                left_out[k] += v
+            ids = [x.id for x in res.created]
+            await simulator.enqueue(ids)
+            await self._set(t.id, message=f"Screening {len(todo)} fields: one simulation each before the search.")
+            await self._refresh(t.id, left_out, generated + len(todo), stage="simulating")
+            await simulator.wait_for(ids)
+        # read every probe's result (also the ones simulated by an earlier run of this task)
+        async with db.session() as s:
+            rows = (await s.execute(select(Candidate.expression, Alpha.sharpe, Alpha.fitness)
+                                    .join(Alpha, Alpha.id == Candidate.alpha_id)
+                                    .where(Candidate.task_id == t.id, Candidate.expression.in_(list(probes))))).all()
+        result = {e: (sh, fi) for e, sh, fi in rows if sh is not None}
+        out: dict[str, list[tuple[str, str]]] = {}
+        kept_total = 0
+        for d, flist in fields.items():
+            scored, unknown = [], []
+            for fid, ftype in flist:
+                e = probe_expression(fid, ftype, category)
+                if e not in result:
+                    unknown.append((fid, ftype))
+                    continue
+                sh, fi = result[e]
+                strength = abs(sh) + 0.5 * abs(fi or 0.0)
+                scored.append((strength, abs(sh), ("-" + fid) if sh < 0 else fid, ftype))
+            scored.sort(reverse=True)
+            keep_n = max(r.screen_keep_min, math.ceil(len(flist) * r.screen_keep_share))
+            keep = [(fid, ft) for _st, ash, fid, ft in scored if ash >= r.screen_min_sharpe][:keep_n]
+            if len(keep) < min(r.screen_keep_min, len(scored)):           # nothing cleared the bar: best few anyway
+                keep = [(fid, ft) for _st, _a, fid, ft in scored[:r.screen_keep_min]]
+            out[d] = keep + unknown
+            kept_total += len(keep)
+        flipped = sum(1 for flist in out.values() for fid, _ in flist if fid.startswith("-"))
+        await self._set(t.id, message=f"Screening kept {kept_total} of {sum(len(v) for v in fields.values())} fields "
+                                      f"({flipped} used sign-flipped); searching those.")
+        return out, len(todo), ids
 
     async def _run_inner(self, task_id: int) -> None:
         t = await self.get(task_id)
@@ -322,7 +402,6 @@ class ResearchManager:
         left_out: Counter = Counter(t.left_out or {})
         generated = t.n_generated or 0
         wave = max(20, min(200, t.cores * 30))
-        exprs = self._expressions(t, fields)
         exhausted = False
         await self._set(task_id, stage="generating")
 
@@ -335,6 +414,23 @@ class ResearchManager:
 
         async def repair_only() -> int:
             return await self._repair_allowance(t, repair_budget) - ROBUST_RESERVE
+
+        # ---------------- field screening, then templates in the order your history ranks their families
+        windows = windows_for_category(category)
+        try:
+            fstats = await family_stats(t.region, t.delay)
+        except Exception:
+            fstats = {}
+        families = [x.family for x in TEMPLATES + PAIR_TEMPLATES]
+        family_order = thompson_order(families, fstats, random.Random(task_id)) if fstats else None
+        n_fields = sum(len(v) for v in fields.values())
+        if r.field_screening and n_fields >= 6 and first_budget >= 2 * n_fields:
+            fields, probed, probe_ids = await self._screen_fields(t, fields, base, category, done_exprs,
+                                                                  first_budget, left_out, generated)
+            generated += probed
+            await self._refresh(task_id, left_out, generated)
+            await self._repair_wave(t, probe_ids, ctx, repair_budget, first_budget, left_out, generated)
+        exprs = self._expressions(t, fields, windows=windows, family_order=family_order)
 
         # ---------------- waves of first-pass expressions, each followed by repairs and BRAIN checks
         while True:
@@ -499,7 +595,8 @@ class ResearchManager:
             await best_first(seeds, replace(ctx, allowance=repair_only), check=check, on_round=refresh)
         c = await self._refresh(task_id, left_out, 0, stage="completed")
         await self._set(task_id, status="complete", finished_at=utcnow(),
-                        message=f"Done: {len(seeds) + len(hard) + len(strong)} alphas worked on, {c['n_simulated']} simulated, "
+                        message=f"Done: {len(seeds) + len(hard) + len(strong)} alphas worked on, "
+                                f"{c['n_simulated']} simulated, "
                                 f"{c['n_strong']} strong, {c['n_ready']} passed BRAIN's check (ready for your manual "
                                 "submission).")
         bus.publish("simulate", f"Repair task #{task_id} complete: {c['n_simulated']} simulated, {c['n_ready']} ready.",

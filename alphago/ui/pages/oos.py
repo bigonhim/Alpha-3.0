@@ -9,8 +9,17 @@ from ...brain.errors import BrainError
 from ...engine.outlook import EXPLAIN, outlook_rows
 from ...jobs.queue import jobs
 from ..alpha_detail import open_alpha
-from ..components import (card, grid_options, info_box, notify_error, num_col, page_header, segmented,
-                          sparkline_col, stat_tile)
+from ..components import (
+    card,
+    grid_options,
+    info_box,
+    notify_error,
+    num_col,
+    page_header,
+    segmented,
+    sparkline_col,
+    stat_tile,
+)
 
 OUTLOOK_RENDER = """params => {
   const k = {overfit: 'fail', fading: 'warning', fine: '', robust: 'pass'}[params.data.outlook] || '';

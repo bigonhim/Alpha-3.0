@@ -48,7 +48,7 @@ class SlotManager:
                         break
                     try:
                         await asyncio.wait_for(self._cond.wait(), timeout=5.0)
-                    except asyncio.TimeoutError:
+                    except TimeoutError:
                         pass
             finally:
                 self.waiting -= 1

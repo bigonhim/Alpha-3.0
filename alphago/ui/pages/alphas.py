@@ -92,7 +92,8 @@ async def page() -> None:
         with ui.row().classes("items-end gap-3 w-full flex-wrap"):
             search = ui.input("Search expression / id / name").classes("w-72").props("clearable")
             verdict = ui.select(VERDICTS, value="all", label="Verdict").classes("w-36")
-            status = ui.select(["all", "UNSUBMITTED", "ACTIVE", "DECOMMISSIONED"], value="all", label="Status").classes("w-40")
+            status = ui.select(["all", "UNSUBMITTED", "ACTIVE", "DECOMMISSIONED"], value="all",
+                               label="Status").classes("w-40")
             region = ui.select(["all", "USA", "GLB", "EUR", "ASI", "CHN", "IND", "JPN", "KOR", "TWN", "HKG", "AMR", "GBR"],
                                value="all", label="Region").classes("w-28")
             origin = ui.select(["all", "app", "synced"], value="all", label="Origin").classes("w-28")

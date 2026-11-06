@@ -25,6 +25,8 @@ _MODES = ("schema", "object", "prompt")
 
 class OpenAIProvider(ChatProvider):
     name = "openai"
+    needs_key = False                 # True for hosted gateways that always need a key (OpenRouter)
+    extra_headers: dict[str, str] = {}
 
     def __init__(self) -> None:
         super().__init__()
@@ -46,8 +48,8 @@ class OpenAIProvider(ChatProvider):
         return "OpenAI" if self.official else f"OpenAI-compatible ({urlparse(self.base_url).netloc})"
 
     def configure(self, api_key: str | None = None) -> bool:
-        key = api_key or llm_key("openai") or ""
-        if self.official and not key:
+        key = api_key or llm_key(self.name) or ""
+        if (self.official or self.needs_key) and not key:
             self._client, self.status = None, "unconfigured"
             return False
         wanted = (self.base_url, key, float(self.cfg.timeout_s or 120))
@@ -59,7 +61,7 @@ class OpenAIProvider(ChatProvider):
                 return False
             # local servers usually need no key, but the SDK insists on one
             self._client = openai.AsyncOpenAI(api_key=key or "not-needed", base_url=wanted[0], timeout=wanted[2],
-                                              max_retries=0)
+                                              max_retries=0, default_headers=self.extra_headers or None)
             self._client_key = wanted
             self.status = "configured"
         return True
@@ -67,7 +69,7 @@ class OpenAIProvider(ChatProvider):
     @property
     def client(self) -> Any:
         if not self.configure():
-            raise LLMError("No OpenAI API key configured — add one on the 'LLM Integration' page.")
+            raise LLMError(f"No {self.label} API key configured — add one on the 'LLM Integration' page.")
         return self._client
 
     async def list_models(self) -> list[dict[str, Any]]:
@@ -83,6 +85,10 @@ class OpenAIProvider(ChatProvider):
 
     def pick(self, role: str) -> str:
         return self.explicit_model(role) or (self.models[0]["name"] if len(self.models) == 1 else "")
+
+    def request_extras(self, model: str) -> dict[str, Any]:
+        """Extra JSON fields for one chat request (OpenRouter's fallback `models` list)."""
+        return {}
 
     def _error(self, exc: Exception) -> LLMError:
         import openai
@@ -120,6 +126,9 @@ class OpenAIProvider(ChatProvider):
             effort = _EFFORT.get(thinking)
             if effort and model not in self._no_effort:
                 kwargs["reasoning_effort"] = effort
+            extra = self.request_extras(model)
+            if extra:
+                kwargs["extra_body"] = extra
             try:
                 completion = await self.client.chat.completions.create(**kwargs)
             except Exception as exc:

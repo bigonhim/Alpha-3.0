@@ -137,8 +137,8 @@ async def startup() -> None:
     from .llm import llm
     llm.configure()
     await llm.restore_models()
-    from .engine import sync  # noqa: F401  (registers job kinds)
     from . import services  # noqa: F401  (registers remaining job kinds / listeners)
+    from .engine import sync  # noqa: F401  (registers job kinds)
     await simulator.start()
     from .engine.research import daily_scheduler, research
     await research.restore()                # tasks interrupted by a restart wait for the user

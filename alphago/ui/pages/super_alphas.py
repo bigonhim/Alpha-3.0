@@ -60,7 +60,8 @@ async def page() -> None:
             with ui.row().classes("gap-3"):
                 universe = ui.select(opts.universes(region.value), value=opts.universes(region.value)[0],
                                      label="Universe").classes("w-36")
-                delay = ui.select(opts.delays(region.value), value=opts.delays(region.value)[0], label="Delay").classes("w-24")
+                delay = ui.select(opts.delays(region.value), value=opts.delays(region.value)[0],
+                                  label="Delay").classes("w-24")
                 neut = ui.select(opts.neutralizations(region.value), value="SUBINDUSTRY" if "SUBINDUSTRY" in
                                  opts.neutralizations(region.value) else opts.neutralizations(region.value)[0],
                                  label="Neutralization").classes("w-40")

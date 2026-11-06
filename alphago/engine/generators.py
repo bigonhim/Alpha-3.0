@@ -67,6 +67,16 @@ async def llm_ideas(scope: dict[str, Any], *, dataset_id: str | None, n: int, go
     system = await pack.static_prefix(region, delay)
     ds_ctx = await pack.dataset_context(dataset_id, region, delay, universe) if dataset_id else \
         "No specific dataset: use price/volume (pv1) fields and any fields you are confident exist."
+    if dataset_id:
+        try:
+            screened = await screened_fields(scope, dataset_id)
+        except Exception:
+            screened = []
+        if screened:
+            listing = ", ".join(f"{f[1:]} (works inverted: use -{f[1:]})" if f.startswith("-") else f
+                                for f, _t in screened[:15])
+            ds_ctx += ("\n\nFields that already showed a signal in a one-simulation screening (build on these "
+                       f"first): {listing}")
     examples = await pack.best_examples(region)
     avoid = await pack.avoid_list(region, dataset_id)
     reviewed = await pack.review_examples(region)
@@ -177,12 +187,45 @@ async def dataset_fields(scope: dict[str, Any], dataset_id: str, min_coverage: f
     return [(r.id, r.type) for r in rows[:limit]]
 
 
+async def screened_fields(scope: dict[str, Any], dataset_id: str, min_sharpe: float | None = None
+                          ) -> list[tuple[str, str]]:
+    """Fields of a dataset that showed a signal in an earlier field screening (research tasks probe every field once),
+    strongest first and signed: a field that worked inverted comes back as "-field". Empty when never screened.
+
+    The Autopilot and the template generator use this so that what a research task learned about a dataset steers
+    every later idea for it."""
+    from sqlalchemy import func
+
+    from ..db.models import Candidate
+    min_sharpe = settings.research.screen_min_sharpe if min_sharpe is None else min_sharpe
+    fields = dict(await dataset_fields(scope, dataset_id, limit=500))
+    if not fields:
+        return []
+    fid = func.json_extract(Candidate.rationale, "$.field")
+    async with db.session() as s:
+        rows = (await s.execute(select(fid, Alpha.sharpe, Alpha.fitness)
+                                .join(Alpha, Alpha.id == Candidate.alpha_id)
+                                .where(func.json_extract(Candidate.rationale, "$.probe").is_not(None),
+                                       Candidate.region == scope["region"], Candidate.delay == int(scope["delay"]),
+                                       fid.in_(list(fields))))).all()
+    best: dict[str, tuple[float, float]] = {}
+    for f, sh, fi in rows:
+        if sh is None:
+            continue
+        strength = abs(sh) + 0.5 * abs(fi or 0.0)
+        if f not in best or strength > best[f][0]:
+            best[f] = (strength, sh)
+    ranked = sorted(((st, sh, f) for f, (st, sh) in best.items() if abs(sh) >= min_sharpe), reverse=True)
+    return [(("-" + f) if sh < 0 else f, fields[f]) for _st, sh, f in ranked]
+
+
 async def template_ideas(scope: dict[str, Any], *, dataset_id: str | None, n: int,
                          base_settings: dict[str, Any] | None = None, rng: random.Random | None = None,
                          families: list[str] | None = None) -> list[CandidateSpec]:
     rng = rng or random.Random()
-    fields = await dataset_fields(scope, dataset_id) if dataset_id else [
-        ("close", "MATRIX"), ("volume", "MATRIX"), ("vwap", "MATRIX"), ("returns", "MATRIX"), ("cap", "MATRIX")]
+    screened = await screened_fields(scope, dataset_id) if dataset_id else []
+    fields = screened if len(screened) >= 3 else (await dataset_fields(scope, dataset_id) if dataset_id else [
+        ("close", "MATRIX"), ("volume", "MATRIX"), ("vwap", "MATRIX"), ("returns", "MATRIX"), ("cap", "MATRIX")])
     category = await dataset_category(dataset_id, scope)
     decay, neut, trunc, nan = settings_for_category(category)
     allowed = brain.options.neutralizations(scope["region"])
@@ -191,6 +234,15 @@ async def template_ideas(scope: dict[str, Any], *, dataset_id: str | None, n: in
                                "neutralization": neut if neut in allowed else allowed[0], "truncation": trunc,
                                "nanHandling": nan})
     catalog = await get_catalog(scope["region"], int(scope["delay"]), scope["universe"])
+    if families is None:                  # learn from history: draw from the families that have produced hits
+        from ..knowledge.templates import TEMPLATES
+        from .families import family_stats, weighted_families
+        try:
+            stats = await family_stats(scope["region"], int(scope["delay"]))
+        except Exception:
+            stats = {}
+        if sum(n for _, n in stats.values()) >= 30:
+            families = weighted_families([t.family for t in TEMPLATES], stats, k=8, rng=rng)
     specs = []
     for expr, family in factory(fields, n=n * 2, rng=rng, families=families):
         if validate(expr, catalog).ok:

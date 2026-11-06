@@ -1,6 +1,6 @@
 # AlphaGo User Guide
 
-_Last updated 21 October 2026. Screenshots use example data. An online copy you can comment on: [AlphaGo User Guide](https://claude.ai/code/artifact/f3e8b974-8270-4943-9708-a60def579acd)._
+_Last updated 6 November 2026. Screenshots use example data. An online copy you can comment on: [AlphaGo User Guide](https://claude.ai/code/artifact/f3e8b974-8270-4943-9708-a60def579acd)._
 
 ## 1. What AlphaGo is
 
@@ -11,6 +11,16 @@ It is a local, single-user app:
 - Your BRAIN password and AI provider keys (Gemini, Anthropic, OpenAI) live only in Windows Credential Manager (service `AlphaGo`).
 - Every alpha, simulation and task is kept in a local SQLite database (alphago.db), and your settings in settings.json, both in `%APPDATA%\AlphaGo`.
 - Only BRAIN and the AI provider you chose are contacted, plus Yahoo Finance when you test an SPC prompt (tickers and dates only). With a local Ollama model, AI prompts never leave your PC.
+
+### What's new on 6 November 2026
+
+- **More submittable alphas from research tasks.** A search task now starts with **field screening**: one simulation per field, then only the fields that showed a signal get the rest of the budget. A field that works upside down is used sign-flipped. Templates use windows that suit the data (long for fundamentals and estimates, short for price/volume and news). They are tried in the order your own results rank them. See [Tasks](#tasks--everything-that-runs).
+- **The Autopilot learns from screening too.** Template ideas and AI ideas for a dataset start from the fields that screening found, and the AI prompt now states BRAIN's actual pass bar (Sharpe, Fitness, turnover, weight concentration, self-correlation).
+- **Alpha Quality Project page.** Pick up to 3 USA alphas for this month's AQP cycle. The AI writes a description and grades it, and the alpha is tagged and described on BRAIN when you confirm. See [Alpha Quality Project](#alpha-quality-project--the-monthly-aqp-cycle).
+- **SPC Lab, end to end.** The AI writes the prompt from your idea and dry-runs it. The app checks the output and its stability, and **Submit to BRAIN** unlocks once every check passes. See [SPC Lab](#spc-lab--systematic-predictions-challenge-prompts).
+- **OpenRouter free models.** A new provider that reads OpenRouter's current free models live and skips any that are retired or busy. See [Step 3](#step-3-connect-an-ai-model-llm-integration).
+- **No more `429: API rate limit exceeded` during the field sync.** The sync paces itself, waits when BRAIN says so, resumes where it stopped, and one failing dataset no longer stops the rest. See [Step 2](#step-2-download-the-catalogue-and-your-alphas-same-page).
+- **Health page:** live BRAIN request pacing, and which template families work for you.
 
 ### What's new on 31 October 2026
 
@@ -260,6 +270,14 @@ Every dataset in the chosen **Region / Delay / Universe** is rated by your AI mo
 | **Candidate statuses** | Counts from new to cancelled |
 | **Jobs** | Background jobs: syncs, checks started from Alphas, submissions, re-fetches, dataset ratings, PnL preparation, Power Pool tags and Osmosis pushes, with progress and result. **Cancel selected**, **Retry selected** |
 
+**How a search task spends its simulations.** Search Lab, Pair and Interaction tasks start with **field screening** when the budget is at least twice the number of fields:
+
+1. Each field gets one simulation: its time-series rank over the data's usual horizon (252 days for fundamentals, 22 for price/volume). That result is a real candidate, not a throwaway test.
+2. The fields that showed a signal are kept, strongest first. A field needs a Sharpe of at least 0.5 in either direction, and at most 35% of a dataset's fields are kept, but never fewer than 4. A field with a negative Sharpe is used sign-flipped.
+3. The rest of the budget goes to templates on the kept fields only. Families that have produced promising alphas for you come first; see **Template families that work for you** on Health.
+
+The task message shows what was kept, for example "Screening kept 9 of 60 fields (3 used sign-flipped)". A resumed task reads its earlier probes back instead of simulating them again. Switch screening off with `research.field_screening` in settings.json.
+
 #### Alphas and the alpha details window
 
 **Alphas** lists everything the app simulated plus everything synced from BRAIN (up to 2,000 rows per view). Filter by **Search expression / id / name (press Enter)**, **Verdict**, **Status** (UNSUBMITTED / ACTIVE / DECOMMISSIONED), **Region**, **Origin** (app / synced), **Min Sharpe**, and sort by **Score**, Sharpe, Fitness or Newest. Buttons below the table: **Refresh list**, **Run submission check on selected**, **Re-fetch selected from BRAIN**, **Export CSV**.
@@ -358,7 +376,7 @@ Compares each submitted alpha's early in-sample years with its last 2 in-sample 
 
 #### SPC Lab — Systematic Predictions Challenge prompts
 
-Tests a prompt before you paste it into BRAIN's form. It never submits.
+Builds a prompt from idea to submission. It submits only when you press **Submit to BRAIN**, after every check passes, and asks first.
 
 ![SPC Lab: prompt with form settings, pasted output with Test PnL results, and saved runs](docs/user-guide/21-spc-lab.png)
 
@@ -367,6 +385,30 @@ Tests a prompt before you paste it into BRAIN's form. It never submits.
 3. **Stability check:** paste a 2nd (and optionally a 3rd) run and click Compare runs to see stock overlap and return correlation.
 4. **Form rules** (collapsed): required fields, row limits, weight and long/short fields, benchmark, character limit. BRAIN does not publish these; enter them when you have them.
 5. **Saved runs:** every test is saved; **Re-test selected** later to watch it.
+6. **Generate, verify & submit:**
+   - **Generate prompt:** type a strategy idea, and the AI writes a rules-based prompt. It includes exact counts and the exact JSON output spec your form rules need, and stays under the character limit.
+   - **Dry-run:** sends the prompt to *your* AI provider 2–5 times and fills the output boxes. BRAIN runs the prompt on its own model, so this tests that the prompt is clear and gives stable answers, not which stocks BRAIN's model will pick.
+   - **Run all checks:** the gates are the prompt is written, it fits the character limit, it asks for JSON with the required keys, no placeholders are left, every dry run passes the form rules, and the runs agree (at least 30% of stocks shared by default). Ticking **Also require Test PnL** adds a check that at least 90% of tickers have prices.
+   - **Submit to BRAIN:** greyed out until every gate passes, then asks you to confirm. The prompt is saved as a version and marked submitted, with BRAIN's reply.
+7. **BRAIN submission endpoint and gates** (collapsed): BRAIN publishes no SPC API, so the app learns it from one submission you make yourself, once:
+   1. Open BRAIN's SPC page in your browser and press **F12**, then open the **Network** tab.
+   2. Submit a prompt on BRAIN as usual.
+   3. Right-click the request that sent it, then **Copy → Copy as cURL** (or **Copy as fetch**).
+   4. Paste it into **Captured request** and click **Import**. The path, method, competition id and a body template are filled in, with your prompt, name, model, version, frequency and weight as placeholders.
+
+   **Find my competitions** lists the competition ids on your account. You can also change the gates here.
+
+#### Alpha Quality Project — the monthly AQP cycle
+
+AQP is a monthly competition. You tag up to 3 of your best **USA** alphas with the cycle's tag (`AQP` + year + month, for example `AQP202611`) and describe each one's hypothesis. The score is **80% description** (how well it matches the expression, how unique the idea is, the quality of the hypothesis) and **20% out-of-sample performance**. An alpha tagged in an earlier cycle can never be tagged again, so every cycle needs 3 new alphas.
+
+| Control | What it does |
+| --- | --- |
+| **Eligible alphas** | Your submitted USA regular alphas that were never in an earlier cycle. They are ranked by **Pick score**: how distinctive the idea is (low self-correlation, uncommon fields) plus out-of-sample evidence (BRAIN's OS Sharpe, else IS Sharpe discounted by your typical retention). Run **Sync my alphas** first so tags and OS results are fresh |
+| **Suggest best 3** | Picks 3 different economic ideas (never two of the same cluster or field set) and moves them to the top |
+| **Write & grade with AI** | Writes a structured description: idea, mechanism, data, step-by-step construction, what is new, expected behaviour, risks. It then grades the text twice. A strict check confirms every field, operator, window and grouping in the expression is described, and the AI judges match, uniqueness and hypothesis quality. It rewrites until the grade stops improving, and shows the problems left and an estimated AQP score out of 100 |
+| Description box | Edit the text freely before you apply it |
+| **Tag AQP… & save on BRAIN** | Asks first, then adds the tag and sets the description on BRAIN. It refuses a 4th alpha in the cycle, an alpha from an earlier cycle, a non-USA alpha, or a description under 200 characters |
 
 #### Super Alphas — combine your submitted alphas
 
@@ -459,7 +501,8 @@ Steps 1–4 run once; steps 5–12 make up each research day, and only step 12 s
 
 1. In **Data catalogue**, choose **Region** `USA`, **Delay** `1`, **Universe** `TOP3000`.
 2. Click **Sync everything for scope**. A job called "Catalogue USA D1 TOP3000" downloads operators, datasets and fields (data categories have their own Data categories button).
-   - Fields still take a few minutes. AlphaGo fetches up to 4 pages at a time (`brain.catalog_concurrency` in settings.json; set it to 1 if BRAIN throttles you). Progress shows under **Recent sync tasks** and on **Tasks**.
+   - Fields still take a few minutes: a full USA catalogue is about 278,000 fields, and BRAIN sends 50 per request. AlphaGo fetches 2 pages at a time and paces them at 2 requests a second to start. When BRAIN answers `429: API rate limit exceeded`, every catalogue request waits as long as BRAIN asks, the pace halves, and the request is retried; the pace picks up again after a run of successes. You can watch it on **Health → BRAIN request pacing**.
+   - **It resumes.** Datasets synced in the last 72 hours are skipped (`brain.fields_resync_hours`), so after an interruption just click **Sync everything for scope** again. A dataset that still fails is retried once at the end and never stops the others. Progress shows under **Recent sync tasks** and on **Tasks**.
    - The line under the buttons counts up as it runs: "Local catalogue: … operators · … dataset scopes · … fields".
 3. In **Your alphas & programs**, click **Sync my alphas** (all submitted alphas plus recent unsubmitted ones), then **Pyramids & Genius**. **Full alpha sync** fetches everything if you need it.
    - BRAIN lists at most 1,000 alphas per request. AlphaGo reads larger accounts in windows of creation dates, so every alpha is fetched exactly once.
@@ -476,12 +519,16 @@ The catalogue is what lets AlphaGo reject an unknown field or a wrong operator *
    | --- | --- |
    | **Gemini (Google AI Studio)** | A key from https://aistudio.google.com/apikey in **Gemini API key** |
    | **Claude (Anthropic)** | A key from https://console.anthropic.com in **Anthropic API key** |
-   | **OpenAI / compatible** | An OpenAI key. For OpenRouter, Groq, DeepSeek, LM Studio, vLLM or any other server with the OpenAI chat API, change **Server URL** too; local servers usually need no key |
+   | **OpenAI / compatible** | An OpenAI key. For Groq, DeepSeek, LM Studio, vLLM or any other server with the OpenAI chat API, change **Server URL** too; local servers usually need no key |
+   | **OpenRouter (free models)** | A key from https://openrouter.ai/keys in **OpenRouter API key** (free models need a key too). Leave **Free models only** on |
    | **Ollama (local)** | Install Ollama from https://ollama.com and download a model with `ollama pull <model>`. Keep the server URL `http://localhost:11434` |
 
 3. **status: ok** turns green, and the three model selectors list the provider's models: **Ideation (bulk ideas)**, **Refinement (near misses)** and **Descriptions**.
    - Gemini, Claude and Ollama: you can leave them on **Auto**. Claude's Auto is Claude Opus 5.5 for every role; Sonnet 5.5 or Haiku 5.5 cost less. Ollama's Auto is the first installed model.
    - OpenAI / compatible: choose a model for each role, then click **Test connection** again. You can also type a model name the server does not list.
+   - OpenRouter: leave them on **Auto**. OpenRouter's free models change every few weeks, so the list comes from OpenRouter each time you test. It is ranked by size, context window, JSON support, retirement date, and how each model has behaved in AlphaGo over the last two days. The line under the selectors shows the top of today's ranking.
+     - Each call sends two backup models, so OpenRouter re-routes by itself, and a model that answers "retired" or "busy" is skipped at once.
+     - Free use is capped per account per day (about 50 requests, or 1,000 with $10 of credit). When the cap is reached, AlphaGo says so and moves to your **Fallback providers**, so add one.
 4. Optional: lower **Daily call budget** (default 400, cloud providers only) or change **Thinking level** (default low).
 
 Cloud providers start at 6 requests a minute, and AlphaGo slows down by itself whenever the provider answers 429 (rate-limited). An Ollama model runs on your PC, one request at a time, with no rate limit and no budget.
@@ -668,8 +715,10 @@ BRAIN's *Consultant Do's and Don'ts* lists "using automation to generate Alpha i
 | Super Alphas | **Tag selected with code** | No, acts on click |
 | Power Pool (eligibility section) | **Write descriptions (AI) for selected** | No, writes on click (up to 25) and overwrites existing descriptions; without an AI provider it writes a template description |
 | Super Alphas | **Write descriptions (AI)** | No, saves to BRAIN, then shows you the text |
+| SPC Lab | **Submit to BRAIN** → **Submit** | Yes, and only after every check passes |
+| Alpha Quality Project | **Tag AQP… & save on BRAIN** → **Apply** | Yes. Adds the cycle tag and sets the description; refuses past 3 alphas a cycle |
 
-**What leaves your PC:** BRAIN API calls; prompts to the AI provider you chose, unless it is a local Ollama model (the knowledge pack of rules, your operators and templates; dataset and field descriptions; for idea generation, your best and rejected alpha expressions with their metrics; for refinement or descriptions, the alpha's expression and metrics; for the research and Genius plans, account statistics; Osmosis Review sends numbers only); and for SPC **Test PnL**, ticker symbols, the benchmark ticker and dates to Yahoo Finance.
+**What leaves your PC:** BRAIN API calls; prompts to the AI provider you chose, unless it is a local Ollama model (the knowledge pack of rules, your operators and templates; dataset and field descriptions; for idea generation, your best and rejected alpha expressions with their metrics; for refinement or descriptions, the alpha's expression and metrics; for the research and Genius plans, account statistics; Osmosis Review sends numbers only); for SPC **Test PnL**, ticker symbols, the benchmark ticker and dates to Yahoo Finance; for the OpenRouter provider, a read of OpenRouter's public model list; and for SPC dry runs, the prompt text to your AI provider.
 
 ### Settings you may want to change
 
@@ -734,6 +783,10 @@ Advanced settings live in `%APPDATA%\AlphaGo\settings.json`, created the first t
 | A task says "Interrupted by an app restart — press Run to continue." | Tick it on **Tasks** and click **Resume** (or **Run All**) |
 | **Submit to BRAIN** is greyed out | Today's limit of submissions made from AlphaGo is reached (for example 4/4) |
 | **Submit…** is greyed out on Alpha details | The alpha is already ACTIVE |
+| A sync job fails with `GET /data-fields → 429: API rate limit exceeded` | Should no longer happen: the sync waits it out. If BRAIN keeps throttling, set `brain.catalog_rps` to 1 and `brain.catalog_concurrency` to 1 in settings.json, then sync again; it resumes where it stopped |
+| OpenRouter says "daily free-model limit reached" | The free tier's daily cap. It resets at midnight UTC; add a fallback provider or $10 of OpenRouter credit |
+| SPC **Submit to BRAIN** stays greyed out | A check above it shows ✗; fix that (often: run more dry runs, or the runs disagree too much). If all pass but it says no endpoint is set, import a captured request (see [SPC Lab](#spc-lab--systematic-predictions-challenge-prompts)) |
+| AQP says "already has 3 alphas" | The cycle allows 3. Remove the tag from one on BRAIN first |
 | SPC **Test PnL** says Yahoo returned no prices | Check the tickers and dates; Yahoo sometimes throttles, so try later |
 | The window does not open | Use browser mode (section 2) |
 | Anything else | Read `%APPDATA%\AlphaGo\logs\alphago.log` |

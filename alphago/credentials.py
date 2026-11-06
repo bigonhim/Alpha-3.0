@@ -54,7 +54,8 @@ def set_gemini_key(key: str | None) -> None:
     _set("gemini_api_key", key)
 
 
-_LLM_KEYS = {"gemini": "gemini_api_key", "claude": "anthropic_api_key", "openai": "openai_api_key"}
+_LLM_KEYS = {"gemini": "gemini_api_key", "claude": "anthropic_api_key", "openai": "openai_api_key",
+             "openrouter": "openrouter_api_key"}
 
 
 def llm_key(provider: str) -> str | None:

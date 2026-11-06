@@ -12,7 +12,7 @@ from ..db.models import Alpha, Candidate
 from ..engine import actions
 from ..engine.evaluator import evaluate
 from ..jobs.queue import jobs
-from .components import (badge, check_badge, fmt_int, fmt_num, fmt_pct, notify_error, verdict_badge)
+from .components import badge, check_badge, fmt_int, fmt_num, fmt_pct, notify_error, verdict_badge
 
 BRAIN_ALPHA_URL = "https://platform.worldquantbrain.com/alpha/{}"
 
@@ -197,7 +197,8 @@ async def properties_dialog(alpha_id: str) -> None:
         ui.label(f"Properties · {alpha_id}").classes("text-lg font-semibold")
         name = ui.input("Name", value=a.name or "").classes("w-full")
         tags = ui.input("Tags (comma separated)", value=", ".join(a.tags or [])).classes("w-full")
-        color = ui.select(["", "RED", "YELLOW", "GREEN", "BLUE", "PURPLE"], value=a.color or "", label="Color").classes("w-40")
+        color = ui.select(["", "RED", "YELLOW", "GREEN", "BLUE", "PURPLE"], value=a.color or "",
+                          label="Color").classes("w-40")
         desc = ui.textarea("Description (Idea / Rationale for data / Rationale for operators)",
                            value=a.description or "").classes("w-full").props("autogrow")
         counter = ui.label().classes("ag-muted text-xs")

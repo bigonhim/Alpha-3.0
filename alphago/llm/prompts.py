@@ -36,6 +36,17 @@ Requirements:
 - Wrap sparse data with ts_backfill; normalise levels (rank/zscore/ts_rank/group_rank or divide by cap).
 - Vary windows, groups and operators across ideas; no two ideas may share the same skeleton.
 - Suggest neutralization / decay / truncation per idea following the settings heuristics.
+
+Aim every idea at BRAIN's submission bar, not just at a positive Sharpe:
+- Sharpe ≥ 1.25 and Fitness ≥ 1.0 (Delay 1). Fitness = Sharpe × sqrt(|returns| / max(turnover, 0.125)), so a signal
+  that trades too often fails even with a good Sharpe: keep turnover roughly 5–40%.
+- Slow data (fundamentals, analyst estimates, models): long windows (126–252), cross-sectional or peer-relative
+  forms such as group_rank(ts_rank(x, 252), subindustry), group_neutralize(rank(x), industry), x / cap ranked.
+- Fast data (price/volume, news, sentiment, options): smooth before ranking (ts_mean, ts_decay_linear) or gate with
+  trade_when on an event, and suggest decay 4–10.
+- Bound the weights (rank / ts_rank / group_rank / zscore) so no stock dominates (CONCENTRATED_WEIGHT) and the
+  signal holds in the smaller sub-universe (LOW_SUB_UNIVERSE_SHARPE).
+- Prefer economically different mechanisms to your existing alphas so self-correlation stays below 0.7.
 Return JSON matching the schema.""",
 
     "refine": """\

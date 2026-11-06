@@ -49,6 +49,43 @@ async def page() -> None:
         ui.label(f"Last failover: {fo['from']} → {fo['to']} at {_dt.datetime.fromtimestamp(fo['at']):%Y-%m-%d %H:%M} "
                  f"({fo['error'][:160]})").classes("ag-warn-box text-sm w-full")
 
+    from ...brain import brain
+    from ...engine import families
+    with card("w-full"):
+        with ui.row().classes("items-center w-full gap-3"):
+            ui.label("BRAIN request pacing (live)").classes("ag-section-title")
+            ui.label("Catalogue calls (data sets, fields, operators) are paced and slow down on every 429 "
+                     "'API rate limit exceeded'; other calls are not paced but wait out a cooldown after one.").classes(
+                "ag-muted text-sm")
+        pacing = ui.label().classes("text-sm ag-mono")
+
+        def show_pacing() -> None:
+            snap = brain.client.gate.snapshot()
+            parts = []
+            for name, b in snap.items():
+                rate = f"{b['rate']:.2f} req/s" if b["rate"] else "unpaced"
+                cool = f", cooling down {b['cooldown_s']:.0f} s" if b["cooldown_s"] else ""
+                parts.append(f"{name}: {rate}, {b['throttled']} rate limit(s) since start{cool}")
+            pacing.set_text(" · ".join(parts))
+
+        show_pacing()
+        ui.timer(5.0, show_pacing)
+
+    with card("w-full"):
+        ui.label("Template families that work for you").classes("ag-section-title")
+        ui.label("Hit = the simulated alpha reached promising or better. Research tasks and template ideas try "
+                 "the families in this order (with some exploration of the rest).").classes("ag-muted text-sm")
+        rows = families.summary(await families.family_stats())
+        if rows:
+            ui.aggrid(grid_options([
+                {"field": "family", "headerName": "Family", "flex": 1, "minWidth": 180},
+                {"field": "trials", "headerName": "Simulated", "width": 110, "type": "numericColumn"},
+                {"field": "hits", "headerName": "Hits", "width": 90, "type": "numericColumn"},
+                num_col("hit_rate", "Hit rate", 1, 110, pct=True),
+            ], rows), theme="quartz").classes("w-full h-56")
+        else:
+            ui.label("No template-built alphas simulated yet.").classes("ag-muted text-sm")
+
     with card("w-full"):
         ui.label(f"AI provider errors per day (last {days} days)").classes("ag-section-title")
         totals = {k: [0] * days for k, _ in LLM_KINDS}

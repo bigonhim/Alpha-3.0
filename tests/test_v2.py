@@ -12,12 +12,11 @@ from sqlalchemy import select
 
 from alphago.config import SPCSettings, settings
 from alphago.db import db
-from alphago.db.models import Alpha, AlphaPnL, Candidate, Dataset, DataField, ResearchTask
+from alphago.db.models import Alpha, AlphaPnL, Candidate, DataField, Dataset, ResearchTask
 from alphago.engine import outlook, pnl, portfolio, spc
 from alphago.engine.simulator import SimulationService
 from alphago.fastexpr import Catalog, FieldInfo, validate
-from alphago.knowledge.templates import (PV_PARTNERS, enumerate_group, enumerate_pairs, enumerate_single,
-                                         second_order)
+from alphago.knowledge.templates import PV_PARTNERS, enumerate_group, enumerate_pairs, enumerate_single, second_order
 
 
 def bdays(n: int, end: str = "2025-12-31") -> list[str]:

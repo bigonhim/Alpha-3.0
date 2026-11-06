@@ -17,8 +17,18 @@ from ...engine.simulator import simulator
 from ...events import bus
 from ...jobs.queue import jobs
 from ...llm import LLMError
-from ..components import badge, bar_col, card, fmt_int, grid_options, notify_error, num_col, page_header, segmented, \
-    stat_tile
+from ..components import (
+    badge,
+    bar_col,
+    card,
+    fmt_int,
+    grid_options,
+    notify_error,
+    num_col,
+    page_header,
+    segmented,
+    stat_tile,
+)
 
 REC_RENDER = """params => {
   if (!params.value) return '';

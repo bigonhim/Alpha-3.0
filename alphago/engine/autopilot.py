@@ -66,7 +66,7 @@ class AutopilotConfig:
     neutralization: str | None = None
 
     @classmethod
-    def from_settings(cls) -> "AutopilotConfig":
+    def from_settings(cls) -> AutopilotConfig:
         r = app_settings.research
         return cls(mode=r.mode, region=r.region, universe=r.universe, delay=r.delay, batch_size=r.batch_size,
                    max_rounds=r.max_rounds, quota_share=r.quota_share,

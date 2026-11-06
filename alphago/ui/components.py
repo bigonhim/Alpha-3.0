@@ -156,7 +156,8 @@ NUM_COL = {"type": "numericColumn", "cellClass": "ag-num"}
 def num_col(field: str, header: str, digits: int = 2, width: int | None = None, pct: bool = False) -> dict[str, Any]:
     fmt = (f"value == null ? '' : (value*100).toFixed({digits}) + '%'" if pct
            else f"value == null ? '' : Number(value).toFixed({digits})")
-    col = {"field": field, "headerName": header, ":valueFormatter": f"params => {{ const value = params.value; return {fmt}; }}",
+    col = {"field": field, "headerName": header,
+           ":valueFormatter": f"params => {{ const value = params.value; return {fmt}; }}",
            **NUM_COL}
     if width:
         col["width"] = width

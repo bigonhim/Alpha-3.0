@@ -14,7 +14,7 @@ from ..brain import brain
 from ..brain.data import gather_all
 from ..config import settings
 from ..db import db
-from ..db.models import (Alpha, ConsultantSnapshot, DataCategory, DataField, Dataset, Operator, Pyramid)
+from ..db.models import Alpha, ConsultantSnapshot, DataCategory, DataField, Dataset, Operator, Pyramid
 from ..events import bus
 from ..jobs.queue import JobContext, jobs
 from . import catalogs
@@ -159,8 +159,10 @@ async def _upsert_fields(rows: list[dict[str, Any]], region: str, delay: int, un
 async def sync_fields(ctx: JobContext | None, params: dict) -> str:
     """Fields for every dataset in scope (per-dataset paging avoids the 10,000-result cap).
 
-    A few datasets are worked on at once and each one's pages are fetched concurrently; one shared limiter keeps
-    the requests in flight at `brain.catalog_concurrency`."""
+    Rate-limit safe: requests are paced by the client's RateGate (BRAIN answers 429 when an account sends too many
+    requests in a short time; a full catalogue is ~278k fields = thousands of 50-field pages). The sync resumes:
+    datasets synced within `brain.fields_resync_hours` are skipped unless `params["full"]`. A dataset that still
+    fails is retried once at the end, one request at a time, and never aborts the other datasets."""
     region, delay, universe = params["region"], int(params["delay"]), params["universe"]
     only = params.get("dataset_ids")
     async with db.session() as s:
@@ -173,27 +175,72 @@ async def sync_fields(ctx: JobContext | None, params: dict) -> str:
                 Dataset.region == region, Dataset.delay == delay, Dataset.universe == universe)))
     if only:
         datasets = [d for d in datasets if d.id in set(only)]
+    skipped = 0
+    hours = int(getattr(settings.brain, "fields_resync_hours", 0) or 0)
+    if hours > 0 and not params.get("full") and not only:
+        fresh_after = now() - timedelta(hours=hours)
+        todo = [d for d in datasets if not d.fields_synced_at or d.fields_synced_at < fresh_after]
+        skipped = len(datasets) - len(todo)
+        datasets = todo
+    # biggest first: they take longest, and a small dataset left for the end finishes quickly
+    datasets.sort(key=lambda d: -(d.field_count or 0))
     width = max(1, int(settings.brain.catalog_concurrency))
     limiter = asyncio.Semaphore(width)
     pending = iter(datasets)                 # shared by the workers: each dataset is taken exactly once
     done = total = 0
+    failed: list[tuple[Dataset, str]] = []
+    n = max(1, len(datasets))
+
+    async def one(ds: Dataset, lim: asyncio.Semaphore) -> None:
+        nonlocal done, total
+        batch = await brain.data.datafields_all(region, delay, universe, dataset_id=ds.id, limiter=lim)
+        await _upsert_fields(batch, region, delay, universe, dataset_pk=ds.pk)
+        done += 1
+        total += len(batch)
+        if ctx:
+            cool = brain.client.gate.cooldown_left("catalog") if hasattr(brain, "client") else 0.0
+            note = f" · rate-limited, pausing {cool:.0f} s" if cool > 1 else ""
+            await ctx.update(done / n, f"{ds.id}: {len(batch)} fields ({total:,} total, {done}/{len(datasets)})"
+                                       f"{note}")
 
     async def worker() -> None:
-        nonlocal done, total
         for ds in pending:
-            batch = await brain.data.datafields_all(region, delay, universe, dataset_id=ds.id, limiter=limiter)
-            await _upsert_fields(batch, region, delay, universe, dataset_pk=ds.pk)
-            done += 1
-            total += len(batch)
-            if ctx:
-                await ctx.update(done / len(datasets), f"{ds.id}: {len(batch)} fields ({total} total)")
+            try:
+                await one(ds, limiter)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:          # keep going; retried below
+                log.warning("field sync of %s failed: %s", ds.id, exc)
+                failed.append((ds, str(getattr(exc, "message", exc))[:200]))
 
-    await gather_all(worker() for _ in range(min(width, len(datasets))))
+    await gather_all(worker() for _ in range(min(width, len(datasets)) or 1))
+    still: list[tuple[Dataset, str]] = []
+    if failed:
+        if ctx:
+            await ctx.update(done / n, f"retrying {len(failed)} dataset(s) one request at a time")
+        serial = asyncio.Semaphore(1)
+        for ds, _err in failed:
+            try:
+                await one(ds, serial)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                still.append((ds, str(getattr(exc, "message", exc))[:200]))
     catalogs.invalidate((region, delay, universe))
-    await _mark(f"fields:{region}:{delay}:{universe}")
-    bus.publish("analyse", f"Catalogued {total:,} fields across {len(datasets)} datasets ({region} D{delay} {universe}).",
+    if not still:
+        await _mark(f"fields:{region}:{delay}:{universe}")
+    note = f"; {skipped} recently synced dataset(s) skipped" if skipped else ""
+    if still:
+        names = ", ".join(d.id for d, _ in still[:8])
+        bus.publish("analyse", f"Catalogued {total:,} fields across {done} datasets ({region} D{delay} {universe}); "
+                               f"{len(still)} dataset(s) still failed ({names}) — run the sync again to resume{note}.",
+                    "warning")
+        if done == 0 and datasets:
+            raise RuntimeError(f"Field sync failed for every dataset: {still[0][1]}")
+        return f"{total} fields in {done} datasets, {len(still)} failed{note}"
+    bus.publish("analyse", f"Catalogued {total:,} fields across {done} datasets ({region} D{delay} {universe}){note}.",
                 "success")
-    return f"{total} fields in {len(datasets)} datasets"
+    return f"{total} fields in {done} datasets{note}"
 
 
 async def sync_scope(ctx: JobContext | None, params: dict) -> str:

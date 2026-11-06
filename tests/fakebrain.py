@@ -148,7 +148,7 @@ class FakeBrain:
         self.alphas[aid]["status"] = "ACTIVE"
         return httpx.Response(200, json={})
 
-    def install(self, router) -> "FakeBrain":  # noqa: ANN001  (a respx router / respx.mock)
+    def install(self, router) -> FakeBrain:  # noqa: ANN001  (a respx router / respx.mock)
         router.post(f"{API}/authentication").mock(return_value=httpx.Response(201, json=AUTH))
         router.get(f"{API}/authentication").mock(return_value=httpx.Response(200, json=AUTH))
         router.post(f"{API}/simulations").mock(side_effect=self.post_sim)

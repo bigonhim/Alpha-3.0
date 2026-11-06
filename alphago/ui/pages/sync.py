@@ -201,7 +201,8 @@ async def page() -> None:
                 ui.button("Sync everything for scope", icon="cloud_download", on_click=lambda: submit(
                     "sync_scope", f"Catalogue {scope()['region']} D{scope()['delay']} {scope()['universe']}", scope()))
                 ui.button("Operators", on_click=lambda: submit("sync_operators", "Sync operators")).props("flat")
-                ui.button("Data categories", on_click=lambda: submit("sync_categories", "Sync data categories")).props("flat")
+                ui.button("Data categories",
+                          on_click=lambda: submit("sync_categories", "Sync data categories")).props("flat")
                 ui.button("Datasets", on_click=lambda: submit(
                     "sync_datasets", f"Datasets {scope()['region']} D{scope()['delay']} {scope()['universe']}",
                     scope())).props("flat")

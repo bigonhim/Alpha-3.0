@@ -36,10 +36,16 @@ TEMPLATES: list[Template] = [
     Template("ts_scale", "ts_scale({f}, {d})"),
     Template("quantile_rank", "quantile(ts_rank({f}, {d}))"),
     Template("decay_exp", "ts_decay_exp_window({f}, {d}, factor=0.5)"),
+    # slow, bounded shapes that clear the fitness bar most often (low turnover, rank-bounded weights)
+    Template("zscore_delta", "ts_zscore(ts_delta({f}, 22), {d})", note="acceleration of a slow-moving field"),
+    Template("mean_diff", "rank(ts_mean({f}, 22) - ts_mean({f}, {d}))", note="short vs long average: trend"),
+    Template("smoothed_rank", "ts_decay_linear(rank({f}), 10)", note="fast data, turnover cut by decay"),
     # --- second order (group-relative)
     Template("group_rank_ts", "group_rank(ts_rank({f}, {d}), {g})"),
     Template("group_neut_zscore", "group_neutralize(ts_zscore({f}, {d}), {g})"),
     Template("group_zscore_level", "group_zscore({f}, {g})"),
+    Template("group_neut_rank", "group_neutralize(rank({f}), {g})", note="peer-relative level, very low turnover"),
+    Template("group_rank_long", "group_rank(ts_rank({f}, {d}), {g}) - 0.5", note="centred peer-relative trend"),
     Template("group_relative", "data = divide({f}, group_median({f}, {g})); group_neutralize(ts_rank(data, {d}), {g})"),
     Template("group_std_scaled", "data = ts_decay_exp_window({f} / group_std_dev({f}, {g}), {d}, factor=0.5); "
                                  "group_neutralize(data, {g})"),
@@ -116,9 +122,48 @@ def settings_for_category(category: str | None) -> tuple[int, str, float, str]:
 
 
 def wrap_field(field_id: str, field_type: str = "MATRIX", backfill: int = 120) -> str:
-    """Pre-wrap a raw field: vector fields are reduced; sparse data back-filled; outliers winsorised."""
+    """Pre-wrap a raw field: vector fields are reduced; sparse data back-filled; outliers winsorised.
+
+    A field id prefixed with "-" (a field the screening found to work with the opposite sign) is negated after
+    wrapping, so every template built on it trades the profitable direction."""
+    sign = ""
+    if field_id.startswith("-"):
+        sign, field_id = "-", field_id[1:]
     base = f"vec_avg({field_id})" if field_type == "VECTOR" else field_id
-    return f"winsorize(ts_backfill({base}, {backfill}), std=4)"
+    return f"{sign}winsorize(ts_backfill({base}, {backfill}), std=4)"
+
+
+# window order by data category: slow data (fundamentals, estimates, models) works on long horizons and keeps
+# turnover (and so fitness) in range; fast data (price/volume, news, sentiment, options) on short ones
+SLOW_WINDOWS = (252, 126, 66, 22)
+FAST_WINDOWS = (22, 66, 5, 126)
+
+
+def windows_for_category(category: str | None) -> tuple[int, ...]:
+    c = (category or "").lower()
+    if any(k in c for k in ("price", "pv", "news", "sentiment", "social", "option", "short", "insider")):
+        return FAST_WINDOWS
+    if any(k in c for k in ("fundamental", "analyst", "model", "earnings", "estimate", "risk", "institution")):
+        return SLOW_WINDOWS
+    return (66, 126, 252, 22)
+
+
+def probe_expression(field_id: str, field_type: str = "MATRIX", category: str | None = None) -> str:
+    """One cheap screening simulation per field: its time-series rank over the category's main horizon. The result
+    is also a real candidate (it is the first item `enumerate_single` would produce for the field)."""
+    return instantiate(TEMPLATES_BY_FAMILY["ts_rank"], wrap_field(field_id, field_type),
+                       d=windows_for_category(category)[0])
+
+
+def _ordered(templates: list[Template], family_order: list[str] | None) -> list[Template]:
+    """Templates with the families that have worked best first (stable for families without a record)."""
+    if not family_order:
+        return templates
+    rank = {f: i for i, f in enumerate(family_order)}
+    return sorted(templates, key=lambda t: rank.get(t.family, len(rank)))
+
+
+TEMPLATES_BY_FAMILY = {t.family: t for t in TEMPLATES}
 
 
 def instantiate(t: Template, f: str, f2: str | None = None, d: int = 66, g: str = "subindustry") -> str:
@@ -142,7 +187,7 @@ def factory(fields: list[tuple[str, str]], *, n: int, rng: random.Random | None 
         f = wrap_field(fid, ftype)
         f2 = None
         if t.needs_f2:
-            others = [x for x in fields if x[0] != fid]
+            others = [x for x in fields if x[0].lstrip("-") != fid.lstrip("-")]
             if not others:
                 continue
             fid2, ftype2 = rng.choice(others)
@@ -182,11 +227,12 @@ def _pair_order() -> list[Template]:
     return [t for t in TEMPLATES if t.needs_f2] + PAIR_TEMPLATES
 
 
-def enumerate_single(fields: list[tuple[str, str]], windows=ENUM_WINDOWS):  # noqa: ANN001, ANN201
+def enumerate_single(fields: list[tuple[str, str]], windows=ENUM_WINDOWS,  # noqa: ANN001, ANN201
+                     family_order: list[str] | None = None):
     """First-order expressions over every field: window-major, so a small budget still covers every field."""
     seen: set[str] = set()
     for d in windows:
-        for t in _first_order():
+        for t in _ordered(_first_order(), family_order):
             for fid, ftype in fields:
                 expr = instantiate(t, wrap_field(fid, ftype), d=d)
                 if expr not in seen:
@@ -194,11 +240,12 @@ def enumerate_single(fields: list[tuple[str, str]], windows=ENUM_WINDOWS):  # no
                     yield expr, t.family
 
 
-def enumerate_group(fields: list[tuple[str, str]], windows=(66, 126, 252), groups=ENUM_GROUPS):  # noqa: ANN001, ANN201
+def enumerate_group(fields: list[tuple[str, str]], windows=(66, 126, 252), groups=ENUM_GROUPS,  # noqa: ANN001, ANN201
+                    family_order: list[str] | None = None):
     seen: set[str] = set()
     for g in groups:
         for d in windows:
-            for t in _group_order():
+            for t in _ordered(_group_order(), family_order):
                 for fid, ftype in fields:
                     expr = instantiate(t, wrap_field(fid, ftype), d=d, g=g)
                     if expr not in seen:
@@ -207,17 +254,17 @@ def enumerate_group(fields: list[tuple[str, str]], windows=(66, 126, 252), group
 
 
 def enumerate_pairs(fields_a: list[tuple[str, str]], fields_b: list[tuple[str, str]], windows=ENUM_WINDOWS,  # noqa: ANN001
-                    groups=("subindustry", "industry")):  # noqa: ANN201
+                    groups=("subindustry", "industry"), family_order: list[str] | None = None):  # noqa: ANN201
     """f from A × f2 from B over every two-field template."""
     seen: set[str] = set()
     for d in windows:
         for g in groups:
-            for t in _pair_order():
+            for t in _ordered(_pair_order(), family_order):
                 if "{g}" not in t.text and g != groups[0]:
                     continue
                 for fa, ta in fields_a:
                     for fb, tb in fields_b:
-                        if fa == fb:
+                        if fa.lstrip("-") == fb.lstrip("-"):
                             continue
                         expr = instantiate(t, wrap_field(fa, ta), wrap_field(fb, tb), d=d, g=g)
                         if expr not in seen:

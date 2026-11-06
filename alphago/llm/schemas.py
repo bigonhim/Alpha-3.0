@@ -129,3 +129,41 @@ class ResearchPlan(BaseModel):
     reason: str = Field(description="Why, in one or two sentences")
     kind: str = Field(description="single | pair | interaction")
     dataset_ids: list[str] = Field(description="1 dataset for single/interaction, 2 for pair, from the list given")
+
+
+class SPCPromptDraft(BaseModel):
+    name: str = Field(description="Short name for the strategy, ≤ 6 words")
+    hypothesis: str = Field(description="Why the selection should outperform, 1–3 sentences")
+    prompt: str = Field(description="The complete prompt text to paste in BRAIN's SPC form")
+
+
+class AQPDescription(BaseModel):
+    title: str = Field(description="Short name of the idea, ≤ 8 words")
+    hypothesis: str = Field(description="The economic hypothesis: who misprices what, and why it corrects")
+    mechanism: str = Field(description="Why the signal predicts returns: the behavioural or structural channel")
+    data: str = Field(description="What each data field measures and why it carries the signal")
+    construction: str = Field(description="Step by step how the expression implements the hypothesis, operator by "
+                                          "operator, including windows, grouping and neutralization")
+    novelty: str = Field(description="What makes this idea different from common textbook factors")
+    risks: str = Field(description="When it should fail, regimes, crowding, capacity")
+    expected_behaviour: str = Field(description="Expected turnover, holding horizon and which stocks it favours")
+
+    def render(self) -> str:
+        return "\n\n".join([
+            f"Idea: {self.title}. {self.hypothesis}",
+            f"Mechanism: {self.mechanism}",
+            f"Rationale for data used: {self.data}",
+            f"Rationale for operators used (construction): {self.construction}",
+            f"What is new: {self.novelty}",
+            f"Expected behaviour: {self.expected_behaviour}",
+            f"Risks and limitations: {self.risks}",
+        ])
+
+
+class DescriptionGrade(BaseModel):
+    match: int = Field(description="0–10: does every claim correspond to the expression (fields, operators, "
+                                   "windows, grouping, sign)? Penalise anything described that is not in the code")
+    uniqueness: int = Field(description="0–10: how original the idea is versus standard textbook factors")
+    hypothesis_quality: int = Field(description="0–10: clear, falsifiable, economically grounded hypothesis")
+    mismatches: list[str] = Field(default_factory=list, description="Claims that do not match the expression")
+    improvements: list[str] = Field(default_factory=list, description="Concrete edits that would raise the scores")

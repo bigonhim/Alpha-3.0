@@ -21,6 +21,7 @@ import httpx
 from ..config import BrainSettings
 from .errors import AuthError, BrainError, PersonaRequired, describe_error_body
 from .quota import QuotaTracker
+from .ratelimit import RateGate, bucket_for
 from .slots import SlotManager
 
 log = logging.getLogger(__name__)
@@ -40,6 +41,8 @@ def _retry_after(response: httpx.Response) -> float | None:
 
 
 class BrainClient:
+    RATE_LIMIT_RETRIES = 12           # 429 retries per request (each after a cooldown that grows to 2 minutes)
+
     def __init__(self, cfg: BrainSettings, credentials: CredentialsProvider) -> None:
         self.cfg = cfg
         self._credentials = credentials
@@ -47,6 +50,8 @@ class BrainClient:
         self._login_lock = asyncio.Lock()
         self.quota = QuotaTracker()
         self.slots = SlotManager(cfg.max_slots)
+        self.gate = RateGate(getattr(cfg, "catalog_rps", 2.0))
+        self.on_throttle: Callable[[str, float], None] | None = None   # (bucket, cooldown seconds) for progress UIs
         self.state = "logged_out"           # logged_out | logged_in | persona_required | error
         self.user_id: str | None = None
         self.permissions: list[str] = []
@@ -243,7 +248,10 @@ class BrainClient:
             await self.ensure_session()
         relogged = False
         attempt = 0
+        throttles = 0
+        bucket = bucket_for(url)
         while True:
+            await self.gate.acquire(bucket)
             try:
                 response = await self.http.request(method, url, params=params, json=json)
             except (httpx.TransportError, httpx.TimeoutException) as exc:
@@ -254,20 +262,37 @@ class BrainClient:
                 await asyncio.sleep(min(30.0, 2 ** attempt + random.random()))
                 continue
             self.quota.update_from_headers(response.headers)
-            final = not ((response.status_code == 401 and authenticated and not relogged)
-                         or (response.status_code in retry_statuses and attempt < retries))
-            self._observe(method, url, response.status_code, json, final, response)
-            if response.status_code == 401 and authenticated and not relogged:
+            status = response.status_code
+            # 429 = "API rate limit exceeded": wait out a shared cooldown, slow the bucket down, and retry patiently
+            # (up to RATE_LIMIT_RETRIES, separate from the transient-error budget) instead of failing the job
+            rate_limited = status == 429 and 429 in retry_statuses and throttles < self.RATE_LIMIT_RETRIES
+            final = not ((status == 401 and authenticated and not relogged) or rate_limited
+                         or (status in retry_statuses and status != 429 and attempt < retries))
+            self._observe(method, url, status, json, final, response)
+            if status == 401 and authenticated and not relogged:
                 relogged = True
                 await self.login()
                 continue
-            if response.status_code in retry_statuses and attempt < retries:
+            if rate_limited:
+                throttles += 1
+                wait = self.gate.throttled(bucket, _retry_after(response))
+                log.warning("BRAIN rate limit on %s %s: pausing %s requests for %.0f s (retry %d/%d)",
+                            method, url, bucket, wait, throttles, self.RATE_LIMIT_RETRIES)
+                if self.on_throttle:
+                    try:
+                        self.on_throttle(bucket, wait)
+                    except Exception:
+                        log.exception("throttle listener failed")
+                continue                      # acquire() waits for the cooldown
+            if status in retry_statuses and status != 429 and attempt < retries:
                 attempt += 1
                 wait = _retry_after(response)
                 if wait is None:
                     wait = min(60.0, 2 ** attempt + random.random())
                 await asyncio.sleep(min(120.0, max(1.0, wait)))
                 continue
+            if status < 400:
+                self.gate.succeeded(bucket)
             return response
 
     def _observe(self, method: str, url: str, status: int, body: Any, final: bool,

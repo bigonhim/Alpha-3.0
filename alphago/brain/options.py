@@ -46,7 +46,7 @@ class SimOptions:
     live: bool = False
 
     @classmethod
-    def from_payload(cls, payload: dict[str, Any]) -> "SimOptions":
+    def from_payload(cls, payload: dict[str, Any]) -> SimOptions:
         opts = cls(regions=[], per_region={}, global_choices={}, ranges={}, live=True)
         post = ((payload or {}).get("actions") or {}).get("POST") or {}
         opts.types = _values((post.get("type") or {}).get("choices")) or ["REGULAR", "SUPER"]

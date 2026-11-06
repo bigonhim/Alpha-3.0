@@ -38,7 +38,9 @@ class BrainSettings(BaseModel):
     relogin_threshold_s: int = 1000   # re-login when session has fewer seconds left
     request_timeout_s: float = 60.0
     max_poll_minutes: int = 45        # give up polling a single simulation after this long
-    catalog_concurrency: int = 4      # data-fields requests in flight during a catalogue sync (1 = one at a time)
+    catalog_concurrency: int = 2      # data-fields requests in flight during a catalogue sync (1 = one at a time)
+    catalog_rps: float = 2.0          # starting pace of catalogue requests per second (halves on every 429, 0 = unpaced)
+    fields_resync_hours: int = 72     # a field sync skips datasets synced more recently than this (0 = always re-sync)
 
 
 class ProviderSettings(BaseModel):
@@ -50,6 +52,7 @@ class ProviderSettings(BaseModel):
     timeout_s: float = 0              # 0 = provider default
     num_ctx: int = 32_768             # Ollama only: context window sent with every request (capped at the model's)
     num_predict: int = 8_192          # Ollama only: max tokens per reply (bounds a runaway generation)
+    free_only: bool = True            # OpenRouter only: list and auto-pick free models only
 
 
 class TournamentSettings(BaseModel):
@@ -61,7 +64,7 @@ class TournamentSettings(BaseModel):
 
 
 class LLMSettings(BaseModel):
-    provider: str = "gemini"          # the one active provider: gemini | claude | openai | ollama
+    provider: str = "gemini"          # the one active provider: gemini | claude | openai | openrouter | ollama
     # Gemini's models per role (kept at the top level so older settings.json files load unchanged)
     ideation_model: str = ""          # empty = auto-pick the best available "flash" model
     refine_model: str = ""            # empty = auto-pick the strongest available model
@@ -77,6 +80,7 @@ class LLMSettings(BaseModel):
     claude: ProviderSettings = Field(default_factory=ProviderSettings)
     openai: ProviderSettings = Field(default_factory=lambda: ProviderSettings(base_url="https://api.openai.com/v1"))
     ollama: ProviderSettings = Field(default_factory=lambda: ProviderSettings(base_url="http://localhost:11434"))
+    openrouter: ProviderSettings = Field(default_factory=lambda: ProviderSettings(base_url="https://openrouter.ai/api/v1"))
 
 
 class ResearchSettings(BaseModel):
@@ -109,6 +113,11 @@ class ResearchSettings(BaseModel):
     duplicate_filter: bool = True     # leave out exact shape+field copies of your submitted alphas before simulating
     cluster_share: float = 0.4        # max share of the day's simulations per economic idea (0 = no cap)
     cluster_min: int = 150            # ... but never cap an idea below this many simulations a day
+    # field screening (search tasks): one probe per field, then the search spends its budget on the fields that worked
+    field_screening: bool = True
+    screen_min_sharpe: float = 0.5    # |Sharpe| a probe needs for its field to be kept (negative = used sign-flipped)
+    screen_keep_share: float = 0.35   # keep at most this share of a dataset's fields ...
+    screen_keep_min: int = 4          # ... but at least this many (the best ones, even below the bar)
 
 
 class ProgramSettings(BaseModel):
@@ -149,6 +158,16 @@ class SPCSettings(BaseModel):
     weight_field: str = ""            # if rows carry a weight, name the field (else equal weight)
     side_field: str = ""              # if rows carry long/short, name the field (values: long/short or 1/-1)
     benchmark: str = "SPY"
+    # submission gates
+    stability_runs: int = 2           # dry runs that must agree before submitting (1 = no stability gate)
+    min_overlap: float = 0.3          # lowest stock overlap allowed between any two dry runs
+    require_pnl: bool = False         # also require a Test PnL with ≥ 90% of tickers priced
+    # BRAIN endpoint (BRAIN publishes no SPC API: copy the request your browser sends on the SPC page, F12 → Network)
+    submit_path: str = ""             # e.g. /competitions/{competition}/submissions ({competition} = competition_id)
+    submit_method: str = "POST"
+    competition_id: str = ""
+    body_template: str = ('{"name": "{name}", "prompt": "{prompt}", "model": "{model}", "version": "{version}", '
+                          '"frequency": "{frequency}", "weight": "{weight}"}')
 
 
 class AlertSettings(BaseModel):
@@ -188,7 +207,7 @@ class AppSettings(BaseModel):
         return app_dir() / "settings.json"
 
     @classmethod
-    def load(cls) -> "AppSettings":
+    def load(cls) -> AppSettings:
         path = cls.path()
         if path.exists():
             try:

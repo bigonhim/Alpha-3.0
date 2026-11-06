@@ -1,7 +1,8 @@
-"""SPC Lab — test a Systematic Predictions Challenge prompt before submitting it on BRAIN's website.
+"""SPC Lab — build, verify and submit a Systematic Predictions Challenge prompt.
 
-Paste the prompt and the JSON array it returned, check the output passes the form rules, then see what it makes from
-the run date using Yahoo Finance prices. Runs are kept so they can be re-tested later.
+Write a prompt (or have the AI write one from a strategy idea), dry-run it on your AI provider, check the output passes
+the form rules and is stable across runs, see what it makes from the run date using Yahoo Finance prices, then submit
+it to BRAIN once every gate passes (after you confirm). Runs are kept so they can be re-tested later.
 """
 
 from __future__ import annotations
@@ -30,10 +31,10 @@ def _date(v: str | None) -> date | None:
 
 async def page() -> None:
     rules = settings.spc
-    state: dict = {"prompt_id": None, "run_id": None, "check": None}
-    page_header("SPC Lab", "Test a Systematic Predictions Challenge prompt before you submit it. Paste the prompt and its "
-                           "output, check the output passes the form, then see what it makes from the run date using "
-                           "Yahoo Finance prices. Come back later and test again to watch it.")
+    state: dict = {"prompt_id": None, "run_id": None, "check": None, "pnl": None, "gates": []}
+    page_header("SPC Lab", "Build a Systematic Predictions Challenge prompt end to end: write it (or let the AI write "
+                           "it), dry-run it, check the output and its stability, test it on Yahoo Finance prices, then "
+                           "submit it to BRAIN once every check passes. Come back later and test again to watch it.")
 
     with ui.row().classes("w-full gap-5 items-stretch no-wrap"):
         # ------------------------------------------------------------ 1. prompt
@@ -94,6 +95,188 @@ async def page() -> None:
                 run3 = ui.textarea("3rd run (JSON array)").classes("w-full ag-mono").props("outlined autogrow")
                 stab_btn = ui.button("Compare runs", icon="compare_arrows", on_click=lambda: do_stability())
                 stab_box = ui.column().classes("w-full gap-1")
+
+    # ------------------------------------------------------------ 3. generate, verify, submit
+    with card("w-full"):
+        with ui.row().classes("items-center w-full gap-2"):
+            ui.icon("rocket_launch").classes("ag-muted")
+            with ui.column().classes("gap-0"):
+                ui.label("3. Generate, verify & submit").classes("ag-section-title")
+                ui.label("The AI writes the prompt from your idea, dry-runs it on your AI provider (BRAIN runs it on "
+                         "its own model, so this tests that the prompt is clear and stable, not BRAIN's picks), then "
+                         "every gate must pass before Submit is allowed.").classes("ag-muted text-xs")
+        with ui.row().classes("w-full gap-3 items-end no-wrap"):
+            idea_in = ui.input("Strategy idea (for the AI)", placeholder="e.g. quality stocks with improving "
+                                                                         "estimate revisions, sector-capped").classes(
+                "grow")
+            runs_in = ui.number("Dry runs", value=max(2, rules.stability_runs), min=1, max=5).classes("w-28")
+            gen_btn = ui.button("Generate prompt", icon="auto_awesome", on_click=lambda: do_generate()).props(
+                "outline")
+            dry_btn = ui.button("Dry-run", icon="science", on_click=lambda: do_dry_run()).props("outline")
+            ui.button("Run all checks", icon="fact_check", on_click=lambda: do_gates()).props("outline")
+            submit_btn = ui.button("Submit to BRAIN", icon="send", on_click=lambda: do_submit()).props(
+                "color=positive")
+        hypo = ui.label().classes("ag-muted text-sm")
+        gate_box = ui.column().classes("w-full gap-0")
+        with ui.expansion("BRAIN submission endpoint and gates", icon="settings_ethernet").classes("w-full"):
+            ui.label("BRAIN publishes no SPC API, so the app learns it from one submission you make yourself: open "
+                     "BRAIN's SPC page, press F12 → Network, submit a prompt, right-click the request that sent it → "
+                     "Copy → Copy as cURL (or Copy as fetch), paste it below and press Import. Every later "
+                     "submission then goes from here.").classes("ag-muted text-xs")
+            with ui.row().classes("gap-3 items-end w-full no-wrap"):
+                captured = ui.textarea("Captured request (cURL or fetch)").classes("grow ag-mono").props(
+                    "outlined autogrow")
+                ui.button("Import", icon="download", on_click=lambda: do_import()).props("outline")
+            ui.label("Or edit by hand: in the body, {name} {prompt} {model} {version} {frequency} {weight} "
+                     "{competition} are filled in ({weight:num} as a number); in the path, {competition} is the "
+                     "competition id.").classes("ag-muted text-xs")
+            with ui.row().classes("gap-3 items-end flex-wrap w-full"):
+                e_path = ui.input("Request path", value=rules.submit_path,
+                                  placeholder="/competitions/{competition}/...").classes("w-96")
+                e_method = ui.select(["POST", "PUT", "PATCH"], value=rules.submit_method or "POST",
+                                     label="Method").classes("w-28")
+                e_comp = ui.input("Competition id", value=rules.competition_id).classes("w-48")
+                ui.button("Find my competitions", icon="search", on_click=lambda: do_find()).props("flat")
+            e_body = ui.textarea("JSON body template", value=rules.body_template).classes("w-full ag-mono").props(
+                "outlined autogrow")
+            with ui.row().classes("gap-3 items-end flex-wrap"):
+                g_runs = ui.number("Runs that must agree", value=rules.stability_runs, min=1, max=5).classes("w-48")
+                g_overlap = ui.number("Min overlap between runs", value=rules.min_overlap, min=0, max=1,
+                                      step=0.05).classes("w-52")
+                g_pnl = ui.checkbox("Also require Test PnL (≥ 90% of tickers priced)", value=rules.require_pnl)
+            comp_box = ui.column().classes("w-full gap-0")
+
+        def save_endpoint() -> None:
+            rules.submit_path, rules.submit_method = (e_path.value or "").strip(), e_method.value or "POST"
+            rules.competition_id, rules.body_template = (e_comp.value or "").strip(), e_body.value or "{}"
+            rules.stability_runs, rules.min_overlap = int(g_runs.value or 1), float(g_overlap.value or 0)
+            rules.require_pnl = bool(g_pnl.value)
+            settings.save()
+
+        for el in (e_path, e_method, e_comp, e_body, g_runs, g_overlap, g_pnl):
+            el.on_value_change(lambda _: save_endpoint())
+
+        def do_import() -> None:
+            try:
+                got = spc.parse_captured_request(captured.value or "")
+            except ValueError as exc:
+                ui.notify(str(exc), type="warning", multi_line=True)
+                return
+            e_path.value, e_method.value = got["path"], got["method"] if got["method"] in ("POST", "PUT", "PATCH") \
+                else "POST"
+            e_comp.value, e_body.value = got["competition_id"] or e_comp.value, got["body_template"]
+            save_endpoint()
+            captured.value = ""
+            filled = ", ".join(f"{k} → {{{v}}}" for k, v in got["mapped"].items())
+            kept = ", ".join(got["unmapped"])
+            ui.notify(f"Endpoint imported: {got['method']} {got['path']}. Filled in: {filled}."
+                      + (f" Kept as captured: {kept}." if kept else ""), type="positive", multi_line=True)
+
+    def form_values() -> dict:
+        return {"model": f_model.value, "version": f_version.value, "frequency": f_freq.value,
+                "weight": f_weight.value}
+
+    async def do_generate() -> None:
+        gen_btn.props("loading")
+        try:
+            draft = await spc.generate_prompt(idea_in.value or "", rules)
+            name.value, text.value, state["prompt_id"] = draft["name"], draft["prompt"], None
+            hypo.set_text(f"Hypothesis: {draft['hypothesis']}")
+            ui.notify("Prompt written. Dry-run it next.", type="positive")
+        except Exception as exc:
+            notify_error(exc, "Could not generate a prompt: ")
+        finally:
+            gen_btn.props(remove="loading")
+
+    async def do_dry_run() -> None:
+        if not (text.value or "").strip():
+            ui.notify("Write or generate a prompt first.", type="warning")
+            return
+        dry_btn.props("loading")
+        try:
+            outs = await spc.dry_run(text.value, int(runs_in.value or 2))
+            for box, out in zip((output, run2, run3), outs):
+                box.value = spc._strip_fences(out)
+            do_check()
+            await do_gates()
+        except Exception as exc:
+            notify_error(exc, "Dry run failed: ")
+        finally:
+            dry_btn.props(remove="loading")
+
+    async def do_gates() -> list:
+        outs = [b.value for b in (output, run2, run3) if (b.value or "").strip()]
+        state["gates"] = spc.gates(text.value or "", outs, rules, state.get("pnl"))
+        gate_box.clear()
+        with gate_box:
+            for g in state["gates"]:
+                icon, cls = ("✓", "ag-green") if g.ok else (("✗", "ag-red") if g.blocking else ("⚠", "ag-amber"))
+                ui.label(f"{icon} {g.name}" + (f" — {g.detail}" if g.detail else "")).classes(f"text-sm {cls}")
+            ok = spc.gates_pass(state["gates"])
+            ui.label("All checks pass: ready to submit." if ok else "Submit stays locked until every ✗ is fixed."
+                     ).classes("text-sm font-semibold " + ("ag-green" if ok else "ag-muted"))
+        submit_btn.props(remove="disable") if spc.gates_pass(state["gates"]) else submit_btn.props("disable")
+        return state["gates"]
+
+    async def do_submit() -> None:
+        gates_now = await do_gates()
+        if not spc.gates_pass(gates_now):
+            ui.notify("Not every check passes yet.", type="warning")
+            return
+        if not rules.submit_path:
+            ui.notify("Set the BRAIN submission endpoint first (see 'BRAIN submission endpoint and gates').",
+                      type="warning")
+            return
+        fv = form_values()
+        with ui.dialog() as dlg, ui.card().classes("ag-card p-5 w-[640px] max-w-[95vw]"):
+            ui.label("Submit this SPC prompt to BRAIN?").classes("font-semibold")
+            ui.label(f"{(name.value or 'Untitled').strip()} · {len(text.value or ''):,} characters · "
+                     f"{fv['model']} {fv['version']} · {fv['frequency']} · weight {fv['weight']}").classes("text-sm")
+            ui.label("A submission counts toward the challenge and cannot be taken back from here.").classes(
+                "ag-amber text-sm")
+            with ui.row().classes("justify-end w-full gap-2"):
+                ui.button("Cancel", on_click=dlg.close).props("flat")
+
+                async def go() -> None:
+                    dlg.close()
+                    submit_btn.props("loading")
+                    try:
+                        pid = state["prompt_id"] or await save_prompt()
+                        res = await spc.submit(name=(name.value or "Untitled").strip(), prompt=text.value,
+                                               form=fv, rules=rules, gate_results=gates_now)
+                        async with db.write() as s:
+                            p = await s.get(SPCPrompt, pid) if pid else None
+                            if p:
+                                p.submitted = True
+                                p.stats = {**(p.stats or {}), "submission": {
+                                    **res, "at": datetime.now(timezone.utc).isoformat(),
+                                    "gates": [{"name": g.name, "ok": g.ok} for g in gates_now]}}
+                        ui.notify(f"Submitted to BRAIN (HTTP {res['status']}).", type="positive")
+                    except Exception as exc:
+                        notify_error(exc, "Submission failed: ")
+                    finally:
+                        submit_btn.props(remove="loading")
+
+                ui.button("Submit", icon="send", on_click=go).props("color=positive")
+        dlg.open()
+
+    async def do_find() -> None:
+        comp_box.clear()
+        try:
+            rows = await spc.find_competitions()
+        except Exception as exc:
+            notify_error(exc, "Could not list competitions: ")
+            return
+        with comp_box:
+            if not rows:
+                ui.label("BRAIN lists no competitions for your account.").classes("ag-muted text-sm")
+            for r in rows:
+                with ui.row().classes("items-center gap-2"):
+                    ui.label(f"{r['id']} · {r['name'] or ''} · {r['status'] or ''}").classes("text-sm ag-mono")
+                    ui.button("Use", on_click=lambda _e, cid=r["id"]: (setattr(e_comp, "value", str(cid)))).props(
+                        "flat dense")
+
+    submit_btn.props("disable")
 
     # ------------------------------------------------------------ rules + saved runs
     with ui.expansion("Form rules (editable — BRAIN does not publish the SPC rules)", icon="rule").classes("w-full"):
@@ -271,6 +454,7 @@ async def page() -> None:
         test_btn.props("loading")
         try:
             out = await spc.test_pnl(res.rows, rules, rd, _date(until.value))
+            state["pnl"] = out
             show_result(out)
             await save_run(res, out)
         except Exception as exc:

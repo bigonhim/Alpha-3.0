@@ -17,9 +17,29 @@ class NavItem:
 
 
 def _nav() -> list[NavItem]:
-    from .pages import (alphas, analytics, audit, autopilot, dashboard, dataset_intel, genius, health, llm, osmosis,
-                        osmosis_review, oos, planner, power_pool, research_history, simulation_matrix, spc_lab,
-                        super_alphas, sync, tasks)
+    from .pages import (
+        alphas,
+        analytics,
+        aqp,
+        audit,
+        autopilot,
+        dashboard,
+        dataset_intel,
+        genius,
+        health,
+        llm,
+        oos,
+        osmosis,
+        osmosis_review,
+        planner,
+        power_pool,
+        research_history,
+        simulation_matrix,
+        spc_lab,
+        super_alphas,
+        sync,
+        tasks,
+    )
     return [
         NavItem("/", "Dashboard", "space_dashboard", "#a78bfa", dashboard.page),
         NavItem("/matrix", "Simulation Matrix", "grid_view", "#818cf8", simulation_matrix.page),
@@ -31,6 +51,7 @@ def _nav() -> list[NavItem]:
         NavItem("/power-pool", "Power Pool", "diamond", "#c084fc", power_pool.page),
         NavItem("/oos", "Out of Sample", "travel_explore", "#7dd3fc", oos.page),
         NavItem("/spc", "SPC Lab", "emoji_events", "#fbbf24", spc_lab.page),
+        NavItem("/aqp", "Alpha Quality Project", "verified", "#4ade80", aqp.page),
         NavItem("/super", "Super Alphas", "hub", "#a78bfa", super_alphas.page),
         NavItem("/tasks", "Tasks", "checklist", "#5eead4", tasks.page),
         NavItem("/alphas", "Alphas", "layers", "#818cf8", alphas.page),

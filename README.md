@@ -58,11 +58,13 @@ python -m venv .venv
    - The header shows the session countdown and today's simulations left.
 2. **Sync with BRAIN**: choose your main scope (for example USA / 1 / TOP3000) and click **Sync everything for scope**. This syncs operators, data categories, datasets and fields.
    - Then click **Sync my alphas** and **Pyramids & Genius**.
-   - Field sync fetches up to 4 pages at a time (`catalog_concurrency` under `brain` in `settings.json`; 1 = one at a time) and can still take a few minutes. Watch it on **Tasks**.
+   - Field sync fetches up to 2 pages at a time (`catalog_concurrency` under `brain` in `settings.json`; 1 = one at a time), paced at 2 requests a second to start (`catalog_rps`). A full catalogue is thousands of 50-field pages, which used to trip BRAIN's `429 API rate limit exceeded`. Now every 429 pauses all catalogue requests for BRAIN's `Retry-After`, halves the pace and retries, and the pace creeps back up after a run of successes.
+   - The sync **resumes**: datasets synced in the last 72 hours (`fields_resync_hours`) are skipped, so a rerun after an interruption carries on where it stopped. A dataset that still fails is retried once at the end and never stops the others. Watch it on **Tasks**.
 3. **LLM Integration**: choose the **Active provider**, then click **Save & test**. One provider is active at a time and every AI feature uses it.
    - **Gemini**: paste a Google AI Studio key (https://aistudio.google.com/apikey).
    - **Claude**: paste an Anthropic API key (https://console.anthropic.com). Auto uses Claude Opus 5.5 for every role; Sonnet 5.5 or Haiku 5.5 cost less.
-   - **OpenAI / compatible**: paste an OpenAI key, or change the server URL to OpenRouter, Groq, DeepSeek, LM Studio, vLLM or any other server with the OpenAI chat API (local servers usually need no key).
+   - **OpenAI / compatible**: paste an OpenAI key, or change the server URL to Groq, DeepSeek, LM Studio, vLLM or any other server with the OpenAI chat API (local servers usually need no key).
+   - **OpenRouter (free models)**: paste a key from https://openrouter.ai/keys. There is no fixed model list: the free models are read live from OpenRouter and ranked by size, context window, JSON support, retirement date and how each one has behaved in the app. Each call carries two backup models, and a retired (404) or busy (429/503) model is skipped at once. Free use is capped per account per day (about 50 requests, or 1,000 with $10 of credit), so add a fallback provider. Switch **Free models only** off to rank paid models too.
    - **Ollama (local)**: install Ollama (https://ollama.com), run `ollama pull <model>`, and keep the default URL `http://localhost:11434`. Set **Context window** high enough for the knowledge pack plus a dataset's fields (15–20k tokens). Local calls don't count toward the daily budget.
    - The test loads the models the provider offers, and the app picks one each for ideation, refinement and descriptions (OpenAI needs your pick). You can change the picks.
    - Cloud providers are paced automatically: the app slows down when a provider returns 429.
@@ -84,9 +86,10 @@ python -m venv .venv
 | **Osmosis Review** | Points now on BRAIN, mistakes per scope, **Predict with AI** and **Explain my mistakes** (numbers only, English or Hinglish), plus allocation history. |
 | **Power Pool** | Monthly pick of the best Power-Pool-shaped submitted alphas per scope (max per scope, rating floor, PnL correlation < 0.5), then confirmed bulk tag changes. Ratings, Calmar, 2-year Sharpe, last-year PnL, sparklines. The v1 eligibility scanner stays in a collapsible section. |
 | **Out of Sample** | Estimated OS outlook from in-sample daily PnL: Holds (last-2y vs earlier Sharpe), risk 0–100, Robust / Likely fine / Fading / Overfit risk, Est. OS Sharpe, main reason. |
-| **SPC Lab** | Systematic Predictions Challenge workbench: prompt library and versions, form settings, copy prompt, **Check** the pasted JSON output against editable form rules, **Test PnL** on Yahoo Finance prices, stability check across runs, saved runs to re-test. Never submits. |
+| **SPC Lab** | Systematic Predictions Challenge, end to end. **Generate prompt** (the AI writes a rules-based prompt with the exact output spec from your idea), **Dry-run** it on your AI provider several times, **Check** the JSON against editable form rules, **Test PnL** on Yahoo Finance prices, and check stability across runs. **Run all checks** shows the gates (character limit, output spec, no placeholders, valid output, runs agree), and **Submit to BRAIN** unlocks only when every gate passes and asks you to confirm. Also: prompt library and versions, and saved runs to re-test. |
+| **Alpha Quality Project** | The monthly AQP cycle (tag `AQP` + year + month, for example `AQP202611`). Lists submitted USA alphas never tagged in an earlier cycle, ranked by distinctiveness plus out-of-sample evidence. **Suggest best 3** picks different ideas. **Write & grade with AI** writes a structured hypothesis description, then grades it two ways: a strict check that every field, operator, window and grouping is described, and an AI judge for match, uniqueness and hypothesis quality. It rewrites until the grade stops improving and estimates the score (80% description, 20% performance). **Tag & save on BRAIN** applies the tag and description after you confirm, refusing a 4th alpha or one used in an earlier cycle. |
 | **Super Alphas** | Follows your Super Alpha guide: rename about 20 ACTIVE alphas to a code (for example `321`), select them with `name == '321'`, combine with `1`, preview, simulate, write the two descriptions (100+ characters each), then a confirmed submit. |
-| **Tasks** | Research tasks (Search Lab, Double dataset · Pair, Interaction) with cores, progress, best Sharpe, pause/stop/delete, **Run All / Stop All**, the Autopilot's daily plan, plus the simulation queue and background jobs. |
+| **Tasks** | Research tasks (Search Lab, Double dataset · Pair, Interaction). Each first **screens the fields**: one simulation per field, keeping only fields that showed a signal, sign-flipped when negative. Templates run with windows suited to the data category, in the order your own hit history ranks their families. Shows cores, progress, best Sharpe, pause/stop/delete, **Run All / Stop All**, the Autopilot's daily plan, plus the simulation queue and background jobs. |
 | **Alphas** | Every alpha, from the app or synced. Double-click for details: metrics, check badges, PnL and yearly charts, self-correlation, optimise, properties and AI description, `/check`, and **Submit…**. |
 | **Research History** | Autopilot runs and the idea journal (hypothesis → verdict). Failed shapes become the AI's "don't repeat" memory. |
 | **Analytics** | Simulations per day, success rate, Sharpe distribution, most frequent failing checks, yield by generator and dataset, and LLM usage. |
@@ -136,7 +139,7 @@ Practitioner data (about 830 simulations per live alpha) shows that **correlatio
 ## 5. Compliance and safety
 
 - **API only.** The app never scrapes the website. It honours `Retry-After`, reduces concurrency on 429, and keeps a daily quota reserve (default 200 simulations, set in `settings.json`).
-- **Nothing is submitted without your click.** Super Alpha renames, Osmosis pushes and Power Pool bulk tag changes each ask for confirmation too. SPC prompts are never submitted by the app. Tag buttons and the AI description buttons write to BRAIN as soon as you click them (see section 6 of the [User guide](USER_GUIDE.md#6-safety-settings-and-troubleshooting)).
+- **Nothing is submitted without your click.** Super Alpha renames, Osmosis pushes and Power Pool bulk tag changes each ask for confirmation too. SPC prompts are submitted only from **Submit to BRAIN**, after every check passes and you confirm. AQP tags and descriptions are applied only from **Tag & save on BRAIN**, after you confirm. Tag buttons and the AI description buttons write to BRAIN as soon as you click them (see section 6 of the [User guide](USER_GUIDE.md#6-safety-settings-and-troubleshooting)).
 - **Assisted mode is the default.** Full Autopilot is capped at a daily number of simulations (default 500), and the top-bar **Stop all** button pauses everything.
 - **Background:** BRAIN's *Consultant Do's and Don'ts* lists "using automation to generate Alpha ideas" as a research don't. There is also a community report of a fully automated account being locked.
   - Full Autopilot is behind a warning you must accept.
@@ -155,7 +158,9 @@ These details are not publicly documented, so the app handles them as it goes ra
 | **SUPER payload shape** | Selection and combo at the top level, or nested. The app tries one and falls back to the other on rejection, then remembers which works. |
 | **Allowed settings** | Regions, universes, delays and neutralizations come from `OPTIONS /simulations` for your account. A built-in table is used until you load them. |
 | **Quota and reset time** | Read from the `X-Ratelimit-*` headers. |
-| **SPC form rules** | Not public. SPC Lab never submits; enter the rules under **Form rules** (required fields, row limits, weight and long/short fields). |
+| **SPC form rules** | Not public. Enter the rules under **Form rules** (required fields, row limits, weight and long/short fields). |
+| **SPC submission endpoint** | Not public. Submit one prompt on BRAIN's SPC page with the browser's developer tools open (F12, then Network). Right-click the request, choose **Copy as cURL** (or **Copy as fetch**), paste it into **SPC Lab → BRAIN submission endpoint and gates → Captured request** and click **Import**. The path, method, competition id and body template are filled in. Until then, Submit stays off. **Find my competitions** lists your competition ids. |
+| **BRAIN API rate limits** | Not published. The client learns them: catalogue calls start at `catalog_rps`, halve on every 429 and recover slowly. |
 | **Osmosis lock time** | Default Sunday 23:59 New York, inferred from the reference app; editable on Osmosis. |
 | **Genius thresholds** | Community-reported values, editable on **Genius AI**. |
 
@@ -168,6 +173,8 @@ These details are not publicly documented, so the app handles them as it goes ra
 | "BRAIN signed out" chip stays red | Sign in on **Sync with BRAIN**. If Persona is pending, finish verification in the browser. |
 | No universes or neutralizations to choose from | Sign in, or click **Sync with BRAIN → Refresh from BRAIN** in the allowed-settings card. |
 | "Field not found" during validation | **Sync everything for scope** for that region, delay and universe. |
+| `GET /data-fields → 429: API rate limit exceeded` | Fixed: the sync now waits it out. If it still happens a lot, set `catalog_rps` to 1 and `catalog_concurrency` to 1 in `settings.json`, then run the sync again. It resumes where it stopped. |
+| OpenRouter "daily free-model limit reached" | The free tier's daily cap. It resets at midnight UTC. Add a fallback provider, or add $10 of credit for 1,000 free requests a day. |
 | LLM 429 or budget reached | Wait. Pacing recovers automatically. Raise the daily budget on **LLM Integration**, use a paid tier, or switch to a local Ollama model (not budgeted). |
 | "Ollama is not reachable" | Start Ollama (it runs at `http://localhost:11434` by default), or fix the server URL on **LLM Integration**. |
 | Ollama warns the prompt was cut | Raise **Context window** on **LLM Integration**, or use a model with a longer context. |
@@ -187,10 +194,10 @@ These details are not publicly documented, so the app handles them as it goes ra
 
 | Path | Contents |
 |---|---|
-| `alphago/brain/` | Async BRAIN API client: auth and Persona, quota, adaptive slots, simulations, alphas, data, users. |
+| `alphago/brain/` | Async BRAIN API client: auth and Persona, quota, adaptive slots, adaptive request pacing (`ratelimit.py`), simulations, alphas, data, users. |
 | `alphago/fastexpr/` | Lark grammar, parser, validator, canonical and skeleton hashes, AST transforms. |
 | `alphago/knowledge/` | Operator signatures, templates, and the LLM knowledge pack. |
-| `alphago/llm/` | LLM router (`llm`) and providers — Gemini, Claude, OpenAI / compatible, Ollama — with structured output, adaptive pacing and the daily budget; schemas, prompts. |
-| `alphago/engine/` | Simulator service (per-task cores), evaluator, generators, optimiser, Autopilot, research tasks, daily PnL, portfolio logic (Osmosis plan/review, Power Pool pick), OOS outlook, SPC, programs, Super Alphas, stats. |
+| `alphago/llm/` | LLM router (`llm`) and providers — Gemini, Claude, OpenAI / compatible, OpenRouter (live free-model ranking and rotation), Ollama — with structured output, adaptive pacing and the daily budget; schemas, prompts. |
+| `alphago/engine/` | Simulator service (per-task cores), evaluator, generators, optimiser, Autopilot, research tasks (with field screening), template-family learning (`families.py`), daily PnL, portfolio logic (Osmosis plan/review, Power Pool pick), OOS outlook, SPC (generate, gates, submit), Alpha Quality Project (`aqp.py`), programs, Super Alphas, stats. |
 | `alphago/jobs/` | Persistent background job queue. |
 | `alphago/ui/` | NiceGUI pages (one module per tab), layout, theme, shared components. |

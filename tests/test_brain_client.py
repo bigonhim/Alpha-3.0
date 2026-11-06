@@ -30,7 +30,8 @@ def fast_sleep(monkeypatch):
         await real_sleep(0)
 
     monkeypatch.setattr(client_mod.asyncio, "sleep", _sleep)
-    from alphago.brain import alphas as alphas_mod, simulations as sims_mod
+    from alphago.brain import alphas as alphas_mod
+    from alphago.brain import simulations as sims_mod
     monkeypatch.setattr(alphas_mod.asyncio, "sleep", _sleep)
     monkeypatch.setattr(sims_mod.asyncio, "sleep", _sleep)
 
@@ -113,10 +114,12 @@ async def test_multi_simulation_children():
         httpx.Response(200, headers={"Retry-After": "1"}, json={"progress": 0.5}),
         httpx.Response(200, json={"id": "P", "status": "COMPLETE", "children": ["C1", "C2", "C3"]}),
     ])
-    respx.get(f"{API}/simulations/C1").mock(return_value=httpx.Response(200, json={"id": "C1", "status": "COMPLETE", "alpha": "A1"}))
+    respx.get(f"{API}/simulations/C1").mock(
+        return_value=httpx.Response(200, json={"id": "C1", "status": "COMPLETE", "alpha": "A1"}))
     respx.get(f"{API}/simulations/C2").mock(return_value=httpx.Response(
         200, json={"id": "C2", "status": "ERROR", "message": "Attempted to use unknown variable \"foo\""}))
-    respx.get(f"{API}/simulations/C3").mock(return_value=httpx.Response(200, json={"id": "C3", "status": "WARNING", "alpha": "A3"}))
+    respx.get(f"{API}/simulations/C3").mock(
+        return_value=httpx.Response(200, json={"id": "C3", "status": "WARNING", "alpha": "A3"}))
     c = make_client()
     outcomes = await SimulationAPI(c).run([regular_payload(e) for e in ("rank(close)", "rank(foo)", "rank(open)")])
     assert [o.alpha_id for o in outcomes] == ["A1", None, "A3"]
@@ -179,7 +182,8 @@ async def test_check_long_poll():
     respx.get(f"{API}/alphas/A1/check").mock(side_effect=[
         httpx.Response(200, headers={"Retry-After": "2"}),
         httpx.Response(200, json={"is": {"checks": [{"name": "LOW_SHARPE", "result": "PASS", "limit": 1.58, "value": 2.1},
-                                                     {"name": "SELF_CORRELATION", "result": "PASS", "limit": 0.7, "value": 0.3}]}}),
+                                                     {"name": "SELF_CORRELATION", "result": "PASS", "limit": 0.7,
+                                                      "value": 0.3}]}}),
     ])
     c = make_client()
     checks = await AlphasAPI(c).check("A1")
@@ -258,10 +262,12 @@ def test_options_parser():
     payload = {"actions": {"POST": {
         "type": {"choices": [{"value": "REGULAR", "label": "Regular"}, {"value": "SUPER", "label": "Super"}]},
         "settings": {"children": {
-            "region": {"choices": {"instrumentType": {"EQUITY": [{"value": "USA", "label": "USA"}, {"value": "GLB", "label": "GLB"}]}}},
+            "region": {"choices": {"instrumentType": {"EQUITY": [{"value": "USA", "label": "USA"},
+                                                                 {"value": "GLB", "label": "GLB"}]}}},
             "universe": {"choices": {"instrumentType": {"EQUITY": {"region": {
                 "USA": [{"value": "TOP3000", "label": "TOP3000"}], "GLB": [{"value": "MINVOL1M", "label": "MINVOL1M"}]}}}}},
-            "delay": {"choices": {"instrumentType": {"EQUITY": {"region": {"USA": [{"value": 1}, {"value": 0}], "GLB": [{"value": 1}]}}}}},
+            "delay": {"choices": {"instrumentType": {"EQUITY": {"region": {"USA": [{"value": 1}, {"value": 0}],
+                                                                           "GLB": [{"value": 1}]}}}}},
             "pasteurization": {"choices": [{"value": "ON"}, {"value": "OFF"}]},
             "truncation": {"type": "float", "minValue": 0, "maxValue": 1},
         }}}}}

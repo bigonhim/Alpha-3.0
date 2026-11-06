@@ -372,7 +372,7 @@ async def pp_pick(month: str, max_per_scope: int, min_rating: str, max_corr: flo
             by_scope[r["scope"]].append(r)
     picked: list[str] = []
     max_corrs: dict[str, float] = {}
-    for scope, items in by_scope.items():
+    for items in by_scope.values():
         items.sort(key=lambda r: (RATINGS.index(r["rating"]), -(r["sharpe_2y"] or -9), -(r["sharpe"] or -9)))
         df = pnl.frame({r["id"]: pnl_rows[r["id"]] for r in items if r["id"] in pnl_rows})
         chosen: list[str] = []
