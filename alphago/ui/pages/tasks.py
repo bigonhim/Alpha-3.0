@@ -15,6 +15,7 @@ from ...engine.simulator import simulator
 from ...jobs.queue import jobs
 from ..alpha_detail import open_alpha
 from ..components import badge, card, grid_options, notify_error, num_col, page_header, stat_tile
+from ..screening import screening_card
 
 PROGRESS_RENDER = """params => {
   const d = params.data.done || 0, p = params.data.planned || 0, pct = p ? Math.min(100, d * 100 / p) : 0;
@@ -206,6 +207,8 @@ async def page() -> None:
             ui.label("Settings").classes("ag-link").on("click", lambda: ui.navigate.to("/autopilot"))
         ap_line = ui.label().classes("ag-muted text-sm")
         plan_box = ui.column().classes("w-full gap-1 mt-1")
+
+    screening_card()
 
     with card("w-full"):
         with ui.row().classes("items-center w-full gap-2"):

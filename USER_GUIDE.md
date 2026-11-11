@@ -1,6 +1,6 @@
 # AlphaGo User Guide
 
-_Last updated 6 November 2026. Screenshots use example data. An online copy you can comment on: [AlphaGo User Guide](https://claude.ai/code/artifact/f3e8b974-8270-4943-9708-a60def579acd)._
+_Last updated 11 November 2026. Screenshots use example data. An online copy you can comment on: [AlphaGo User Guide](https://claude.ai/code/artifact/f3e8b974-8270-4943-9708-a60def579acd)._
 
 ## 1. What AlphaGo is
 
@@ -11,6 +11,21 @@ It is a local, single-user app:
 - Your BRAIN password and AI provider keys (Gemini, Anthropic, OpenAI) live only in Windows Credential Manager (service `AlphaGo`).
 - Every alpha, simulation and task is kept in a local SQLite database (alphago.db), and your settings in settings.json, both in `%APPDATA%\AlphaGo`.
 - Only BRAIN and the AI provider you chose are contacted, plus Yahoo Finance when you test an SPC prompt (tickers and dates only). With a local Ollama model, AI prompts never leave your PC.
+
+### What's new on 11 November 2026
+
+- **AlphaGo.bat.** Double-click it to install (the first time) and start AlphaGo. See [section 2](#2-install-start-and-close).
+- **SPC Lab, rebuilt.** **Generate with AI, check, and submit** writes or takes a prompt and runs it several times. It then applies gates: length, format, no placeholders, form rules, clean output, stability, tickers priced, optional backtest. A failed gate is rewritten from its own evidence.
+  - Submission learns BRAIN's endpoint from one hand submission: **Import** the request you copied from the browser.
+  - Every submission is previewed, confirmed and sent once, never retried. An unknown outcome counts toward the daily limit.
+  - The new [SPC submission guide](SPC_SUBMISSION_GUIDE.md) covers every step.
+- **Alpha Quality Project, rebuilt.**
+  - Alphas used in an earlier cycle are excluded, even when the tag has not synced yet.
+  - Each description must name every field and operator, pass an AI judge and differ from the other picks.
+  - One confirmed job writes description + tag, all or nothing.
+- **BRAIN Themes** (new page). The GLB theme is ready to research: sync its data, start or schedule theme tasks, and see which alphas BRAIN says match. See [BRAIN Themes](#brain-themes--the-glb-theme-and-any-other-theme).
+- **Python Alphas** (new page). Write, check and simulate alphas in Python once BRAIN offers it to your account. See [Python Alphas](#python-alphas--alphas-written-in-python).
+- **Screening before simulating** (Tasks and Alpha Autopilot). Every screen now has a switch, all on by default: field screening, copies of submitted alphas, the daily cap per idea, AI self-check, variants per shape. **Reset to defaults (all on)** puts them back.
 
 ### What's new on 6 November 2026
 
@@ -105,6 +120,11 @@ Sharpe and fitness limits come from BRAIN's own check results; AlphaGo's built-i
 
 Double-click `dist\AlphaGo\AlphaGo.exe` and the window opens in a few seconds. Nothing else needs installing on Windows 10 or 11.
 
+**From the project folder instead:** double-click `AlphaGo.bat`.
+
+- **First time:** it finds Python 3.11 or newer (and offers to install it if it is missing), installs AlphaGo into `.venv` and offers a desktop shortcut. Later double-clicks just start the app.
+- **Options:** `AlphaGo.bat --web` opens AlphaGo in your browser, and `--update` re-installs its packages. `AlphaGo.bat --help` lists them all.
+
 ### What you need
 
 | Item | Detail |
@@ -169,7 +189,7 @@ First time? Go straight to section 5, steps 1 to 4. They take about 10 minutes a
 
 ## 3. Tour of the app
 
-The window has three parts: a header of live status chips, a sidebar with 17 pages, and the page you are on. This guide groups the pages into three sets: daily research, BRAIN programs, and records and setup (the sidebar itself is one list). Screenshots in this guide use example data.
+The window has three parts: a header of live status chips, a sidebar with 23 pages, and the page you are on. This guide groups the pages into three sets: daily research, BRAIN programs, and records and setup (the sidebar itself is one list). Screenshots in this guide use example data.
 
 ### The window
 
@@ -376,39 +396,58 @@ Compares each submitted alpha's early in-sample years with its last 2 in-sample 
 
 #### SPC Lab — Systematic Predictions Challenge prompts
 
-Builds a prompt from idea to submission. It submits only when you press **Submit to BRAIN**, after every check passes, and asks first.
+Tests a prompt before it goes into BRAIN's form, and can write, check and submit one for you. **First time? Follow the [SPC submission guide](SPC_SUBMISSION_GUIDE.md)**: one hand submission on BRAIN teaches AlphaGo the form and the endpoint.
 
 ![SPC Lab: prompt with form settings, pasted output with Test PnL results, and saved runs](docs/user-guide/21-spc-lab.png)
 
-1. **Prompt:** load a ★ starter or saved prompt from **Prompt library**, set the form settings (Model, Version, Frequency, Weight), watch the 10,000-character counter, **Save as new version**, **Copy prompt**.
-2. **Output:** paste the JSON array the prompt returned, set **Run date** and optionally **Test until**, then **Check** (form rules) and **Test PnL** (Yahoo Finance prices; return, return vs the benchmark (SPY by default), Sharpe, max drawdown, chart, best and worst names).
-3. **Stability check:** paste a 2nd (and optionally a 3rd) run and click Compare runs to see stock overlap and return correlation.
-4. **Form rules** (collapsed): required fields, row limits, weight and long/short fields, benchmark, character limit. BRAIN does not publish these; enter them when you have them.
-5. **Saved runs:** every test is saved; **Re-test selected** later to watch it.
-6. **Generate, verify & submit:**
-   - **Generate prompt:** type a strategy idea, and the AI writes a rules-based prompt. It includes exact counts and the exact JSON output spec your form rules need, and stays under the character limit.
-   - **Dry-run:** sends the prompt to *your* AI provider 2–5 times and fills the output boxes. BRAIN runs the prompt on its own model, so this tests that the prompt is clear and gives stable answers, not which stocks BRAIN's model will pick.
-   - **Run all checks:** the gates are the prompt is written, it fits the character limit, it asks for JSON with the required keys, no placeholders are left, every dry run passes the form rules, and the runs agree (at least 30% of stocks shared by default). Ticking **Also require Test PnL** adds a check that at least 90% of tickers have prices.
-   - **Submit to BRAIN:** greyed out until every gate passes, then asks you to confirm. The prompt is saved as a version and marked submitted, with BRAIN's reply.
-7. **BRAIN submission endpoint and gates** (collapsed): BRAIN publishes no SPC API, so the app learns it from one submission you make yourself, once:
-   1. Open BRAIN's SPC page in your browser and press **F12**, then open the **Network** tab.
-   2. Submit a prompt on BRAIN as usual.
-   3. Right-click the request that sent it, then **Copy → Copy as cURL** (or **Copy as fetch**).
-   4. Paste it into **Captured request** and click **Import**. The path, method, competition id and a body template are filled in, with your prompt, name, model, version, frequency and weight as placeholders.
-
-   **Find my competitions** lists the competition ids on your account. You can also change the gates here.
+1. **Prompt:** load a ★ starter or saved prompt from **Prompt library**, set the form settings (Model, Version, Frequency, Weight; 📌 saves them as your defaults), watch the character counter, **Save as new version**, **Copy prompt**.
+2. **Output:** paste the JSON array the prompt returned, set **Run date** and optionally **Test until**, then **Check** (form rules) and **Test PnL** (Yahoo Finance prices).
+3. **Stability check:** paste a 2nd (and optionally a 3rd) run and click **Compare runs**.
+4. **Generate with AI, check, and submit:**
+   - **Generate & check** writes a prompt from your idea. **Check the prompt in the editor** takes yours instead.
+   - The prompt is run several times on your AI provider, and a report lists the gates: **Prompt length**, **Prompt format**, **No placeholders**, **Form rules**, **Clean output**, **Stability**, **Tickers priced** and an optional **Backtest**.
+   - A failed gate is rewritten from its evidence. A gate that cannot run counts as not passed.
+5. **Submit settings:** **Import** a request copied from the browser (Copy as cURL / Copy as fetch). It fills **Path**, **Method**, **Competition id** and **JSON body** with placeholders; cookies are dropped. **Find my competitions** lists your competition ids. **Max submissions per day** is AlphaGo's own guard.
+6. **Submit:**
+   - **Preview request** shows what would be sent, and sends nothing.
+   - **Submit to BRAIN…** works only for a prompt whose gates all passed and whose text is unchanged since. It asks for confirmation and sends the prompt once, never retrying.
+   - After *error* or *unknown*, check BRAIN before trying again.
+   - **Submit automatically** (off by default) submits as soon as every gate passes, under the same limits. It applies to SPC prompts only.
+7. **Form rules** (collapsed) and **Saved runs** work as before.
 
 #### Alpha Quality Project — the monthly AQP cycle
 
-AQP is a monthly competition. You tag up to 3 of your best **USA** alphas with the cycle's tag (`AQP` + year + month, for example `AQP202611`) and describe each one's hypothesis. The score is **80% description** (how well it matches the expression, how unique the idea is, the quality of the hypothesis) and **20% out-of-sample performance**. An alpha tagged in an earlier cycle can never be tagged again, so every cycle needs 3 new alphas.
+Each month you tag up to 3 of your best **USA** alphas with `AQP<YYYYMM>` (for example `AQP202611`) and describe them. BRAIN scores 80% on the description (match to the expression, uniqueness, hypothesis) and 20% on out-of-sample performance. An alpha tagged in one cycle can never be tagged again.
+
+1. **Refresh list:**
+   - **State:** *eligible*, *selected* (tagged this cycle) or *used* (tagged in an earlier cycle, or remembered by AlphaGo; excluded).
+   - **AQP score** is the app's heuristic: 80% **Explainable**, 20% OS Sharpe (BRAIN's, or an *est.* from your predicted retention).
+2. **Suggest the best 3** ticks three from different idea families.
+3. **Write descriptions (AI)** writes each description, then pre-checks it: every field and operator named, minimum length, an AI judge score, and descriptions that differ from each other. A failed check is rewritten.
+4. **Review & apply…** lets you edit and **Re-check**, then one confirmed job writes description + tag, all or nothing. If BRAIN fails mid-way, the message says which alphas were already written.
+5. **Remove this cycle's tag…** removes only the current tag.
+
+#### BRAIN Themes — the GLB theme and any other theme
+
+BRAIN announces themes in its notifications. Matching alphas earn the theme's multiplier, and BRAIN's check reports a match as MATCHES_THEMES. The page starts with the **GLB theme** (GLB · D1 · TOP3000, COUNTRY neutralization).
 
 | Control | What it does |
 | --- | --- |
-| **Eligible alphas** | Your submitted USA regular alphas that were never in an earlier cycle. They are ranked by **Pick score**: how distinctive the idea is (low self-correlation, uncommon fields) plus out-of-sample evidence (BRAIN's OS Sharpe, else IS Sharpe discounted by your typical retention). Run **Sync my alphas** first so tags and OS results are fresh |
-| **Suggest best 3** | Picks 3 different economic ideas (never two of the same cluster or field set) and moves them to the top |
-| **Write & grade with AI** | Writes a structured description: idea, mechanism, data, step-by-step construction, what is new, expected behaviour, risks. It then grades the text twice. A strict check confirms every field, operator, window and grouping in the expression is described, and the AI judges match, uniqueness and hypothesis quality. It rewrites until the grade stops improving, and shows the problems left and an estimated AQP score out of 100 |
-| Description box | Edit the text freely before you apply it |
-| **Tag AQP… & save on BRAIN** | Asks first, then adds the tag and sets the description on BRAIN. It refuses a 4th alpha in the cycle, an alpha from an earlier cycle, a non-USA alpha, or a description under 200 characters |
+| **Sync theme data** | Reads the datasets BRAIN flags for the theme (`theme=true`) and syncs their fields |
+| **Plan task** / **Start research now** | Search Lab task on the best theme dataset with the theme's settings (Plan waits for approval; Start **spends quota**) |
+| **Plan one task per active theme after every quota reset** | Automation, following the Autopilot mode |
+| **Check theme matches** | BRAIN's check (no simulations) on strong / ready alphas of the scope; lists the matches |
+| **Theme settings** | Scope, neutralization, decay, dates, multiplier, datasets from the announcement; **Add a theme** |
+
+#### Python Alphas — alphas written in Python
+
+The badge says whether BRAIN offers a Python language to your account (read from the allowed settings; **Refresh from BRAIN** re-reads them). Until BRAIN offers it, you can write and check code but not simulate it.
+
+1. Paste BRAIN's Python Alpha docs or an example under **Reference and template**: the AI writes against it.
+2. **Write code** from an idea (or a FASTEXPR expression to translate); failing code is fixed by the AI.
+3. **Check code** (free): syntax, size, no file / network / process / dynamic-code access.
+4. **Simulate (1 simulation)**. Results appear in the table and on **Alphas**.
+5. Automation: one idea per line, then **Write & simulate in the background**.
 
 #### Super Alphas — combine your submitted alphas
 

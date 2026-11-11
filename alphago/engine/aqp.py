@@ -1,381 +1,481 @@
-"""Alpha Quality Project (AQP): the monthly cycle where you tag up to 3 of your best USA alphas and prove why.
+"""Alpha Quality Project (AQP): pick up to 3 USA alphas per monthly cycle, write their descriptions, tag them.
 
-Rules (BRAIN's announcement): tag up to 3 USA alphas with the cycle tag (AQP + YYYYMM, e.g. AQP202611); each needs a
-detailed description of its hypothesis. Score = 80% description (how well it matches the expression, how unique the
-idea is, the quality of the hypothesis) + 20% the alpha's out-of-sample performance. An alpha tagged in an earlier
-cycle can never be tagged again, so every cycle needs 3 different alphas.
+BRAIN's rules for a cycle: tag up to 3 of your best USA alphas with AQP<YYYYMM>; each description is scored on how well it
+matches the expression, how unique the idea is and how good the hypothesis is (80% together), plus the alpha's
+out-of-sample performance (20%); an alpha tagged in an earlier cycle cannot be tagged again.
 
-The app:
-1. lists eligible alphas (submitted, USA, regular, never in an earlier AQP cycle) ranked by an estimate of the score:
-   out-of-sample evidence first (OS Sharpe, else IS Sharpe × your predicted retention), plus how distinctive the idea
-   is (low self-correlation, uncommon fields/datasets, a cluster not already picked);
-2. picks a diverse set of 3 (different economic ideas);
-3. writes each description with the AI in a fixed structure, then grades it twice: a deterministic match check (every
-   field, operator, window and group in the expression must be described; nothing described may be missing from it)
-   and an AI judge for match / uniqueness / hypothesis quality, rewriting until the grade stops improving;
-4. tags and describes the alphas on BRAIN only when you press Apply and confirm (PATCH /alphas/{id}).
+What this module does with that:
+  - candidates   ACTIVE, regular, USA alphas, with the ones already used in an earlier cycle marked and excluded;
+  - ranking      a heuristic, NOT BRAIN's score: 80% "describability" (simple expression, few fields, a known idea family,
+                 low overlap with your other alphas) and 20% out-of-sample Sharpe (BRAIN's, else an estimate from your
+                 predicted OS/IS retention, else a 50% haircut of the in-sample Sharpe);
+  - pick         three alphas from different idea families;
+  - description  written by the AI to the three scored criteria, then pre-checked: every field and operator of the
+                 expression must be named (a literal check), an AI judge scores match / uniqueness / hypothesis, and the
+                 three descriptions must differ from each other. A failed check sends its evidence back for a rewrite;
+  - apply        one confirmed job writes the description and the cycle tag together, all-or-nothing validation first.
+
+Tagging is permanent for that alpha (it can never be used in another cycle), so nothing is written without a confirmed job.
 """
 
 from __future__ import annotations
 
 import logging
 import re
-from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from typing import Any
 
+from pydantic import BaseModel, Field
 from sqlalchemy import select
 
-from ..brain import brain
+from ..config import settings
 from ..db import db
-from ..db.models import Alpha, Candidate, DataField, Dataset
-from ..fastexpr.metrics import compute_metrics
-from ..knowledge import pack
+from ..db.models import Alpha, DataField
+from ..events import bus
+from ..jobs.queue import JobContext, jobs
 from ..llm import llm
-from ..llm.schemas import AQPDescription, DescriptionGrade
+from . import actions
 
 log = logging.getLogger(__name__)
 
-MAX_PER_CYCLE = 3
-REGION = "USA"
-TAG_RE = re.compile(r"^AQP\d{6}$", re.I)
-GROUPS = ("subindustry", "industry", "sector", "market", "country", "exchange")
-DESCRIPTION_WEIGHT, PERFORMANCE_WEIGHT = 0.8, 0.2
-MAX_REWRITES = 2
+LEDGER_KEY = "aqp_ledger"
+DRAFT_KEY = "aqp:draft:{}"
+BACKUP_KEY = "aqp:backup:{}"
+_TOKEN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+_NUMBER = re.compile(r"(?<![A-Za-z_\.])\d+(?:\.\d+)?")
+_WORDS = re.compile(r"[a-z]{4,}")
+_RESERVED = {"true", "false", "nan", "inf", "if", "else", "and", "or", "not", "in"}
 
 
-def cycle_tag(d: date | None = None) -> str:
-    d = d or date.today()
-    return f"AQP{d.year}{d.month:02d}"
+# ---------------------------------------------------------------- cycle and eligibility
+
+def current_cycle(today: date | None = None) -> str:
+    return f"{settings.aqp.tag_prefix}{(today or date.today()):%Y%m}"
 
 
-def aqp_tags(tags: Any) -> list[str]:
-    return [str(t).upper() for t in (tags or []) if TAG_RE.match(str(t))]
+def cycle_pattern() -> re.Pattern[str]:
+    return re.compile(rf"^{re.escape(settings.aqp.tag_prefix)}\d{{6}}$")
 
 
-def tagged_before(a: Alpha, tag: str) -> bool:
-    """True when the alpha carries an AQP tag of another cycle (it can never be tagged again)."""
-    return any(t != tag.upper() for t in aqp_tags(a.tags))
+def is_cycle_tag(tag: str) -> bool:
+    return bool(cycle_pattern().match(tag or ""))
 
 
-def in_cycle(a: Alpha, tag: str) -> bool:
-    return tag.upper() in aqp_tags(a.tags)
+def eligibility(a: Alpha, cycle: str, ledger: list[dict[str, Any]] | None = None) -> tuple[str, str]:
+    """(state, reason): selected | eligible | used | excluded."""
+    tags = list(a.tags or [])
+    if (a.type or "REGULAR") != "REGULAR":
+        return "excluded", "Only regular alphas can be described this way."
+    if a.status != "ACTIVE":
+        return "excluded", "Not submitted yet, so it has no out-of-sample performance."
+    if (a.region or "") != settings.aqp.region:
+        return "excluded", f"Not a {settings.aqp.region} alpha."
+    if cycle in tags:
+        return "selected", f"Tagged {cycle}."
+    earlier = [t for t in tags if is_cycle_tag(t)] + [e["cycle"] for e in (ledger or []) if e.get("alpha_id") == a.id
+                                                    and e.get("cycle") != cycle]
+    if earlier:
+        return "used", f"Already used in {sorted(set(earlier))[0]}: it cannot be tagged again."
+    return "eligible", ""
 
 
-# ---------------------------------------------------------------- performance & uniqueness estimate
+# ---------------------------------------------------------------- ranking (a heuristic, not BRAIN's score)
 
-def performance_score(a: Alpha) -> float:
-    """0–1 estimate of the 20% performance part: out-of-sample Sharpe when BRAIN has it, else IS Sharpe discounted by
-    your predicted OS/IS retention (0.6 when unknown, a typical haircut)."""
+def describability(a: Alpha) -> tuple[float, list[str]]:
+    """0 to 1: how well this alpha can be explained accurately and distinctively."""
+    score, why = 1.0, []
+    ops, fields = a.op_count or 0, a.field_count or len(a.fields or [])
+    if ops > 12:
+        score -= 0.35
+        why.append(f"{ops} operators: hard to explain step by step")
+    elif ops > 8:
+        score -= 0.15
+        why.append(f"{ops} operators")
+    if fields > 3:
+        score -= 0.15
+        why.append(f"{fields} fields")
+    if not a.cluster:
+        score -= 0.10
+        why.append("no clear idea family")
+    sc = a.est_self_corr if a.est_self_corr is not None else a.self_corr
+    if sc is not None and sc > 0.6:
+        score -= 0.20
+        why.append(f"close to another of your alphas ({sc:.2f})")
+    return max(0.0, score), why
+
+
+def performance(a: Alpha) -> tuple[float, float | None, str]:
+    """0 to 1 from BRAIN's out-of-sample Sharpe when there is one, else an estimate from the in-sample Sharpe: your
+    predicted OS/IS retention when the app has one, else a 50% haircut."""
     if a.os_sharpe is not None:
-        s = float(a.os_sharpe)
-    else:
-        s = float(a.sharpe or 0.0) * float(a.os_retention_pred if a.os_retention_pred is not None else 0.6)
-    return max(0.0, min(1.0, s / 2.0))
+        return max(0.0, min(1.0, a.os_sharpe / 2.0)), a.os_sharpe, "OS"
+    if a.sharpe is not None:
+        keep = a.os_retention_pred if a.os_retention_pred is not None else 0.5
+        est = a.sharpe * max(0.0, min(1.5, float(keep)))
+        return max(0.0, min(1.0, est / 2.0)), est, "est."
+    return 0.0, None, "none"
 
 
-def distinctiveness(a: Alpha, field_popularity: dict[str, int]) -> float:
-    """0–1 proxy for idea uniqueness: low self-correlation and uncommon fields score higher."""
-    corr = a.self_corr if a.self_corr is not None else a.est_self_corr
-    corr_part = 1.0 - max(0.0, min(1.0, float(corr))) if corr is not None else 0.5
-    pops = [field_popularity.get(f, 0) for f in (a.fields or [])]
-    if pops:
-        avg = sum(pops) / len(pops)
-        rare = 1.0 / (1.0 + avg / 500.0)          # a field used in ~500 alphas on BRAIN halves this
-    else:
-        rare = 0.5
-    shape = min(1.0, (a.field_count or len(a.fields or []) or 1) / 3.0)   # 2–3 fields read as a richer idea
-    return round(0.5 * corr_part + 0.35 * rare + 0.15 * shape, 3)
+def score_alpha(a: Alpha) -> dict[str, Any]:
+    d, why = describability(a)
+    perf, sharpe, basis = performance(a)
+    return {"describability": round(d, 3), "perf": round(perf, 3), "os": sharpe, "os_basis": basis,
+            "score": round(0.8 * d + 0.2 * perf, 3), "notes": "; ".join(why)}
 
 
-@dataclass
-class Candidate_:
-    alpha: Alpha
-    performance: float
-    unique: float
-    estimate: float
-    in_cycle: bool
-    reasons: list[str] = field(default_factory=list)
-
-    def row(self) -> dict[str, Any]:
-        a = self.alpha
-        return {"id": a.id, "code": a.code, "cluster": a.cluster or "", "sharpe": a.sharpe, "fitness": a.fitness,
-                "os_sharpe": a.os_sharpe, "self_corr": a.self_corr if a.self_corr is not None else a.est_self_corr,
-                "performance": round(self.performance, 3), "unique": round(self.unique, 3),
-                "estimate": round(self.estimate, 3), "in_cycle": self.in_cycle,
-                "described": bool((a.description or "").strip()), "reasons": "; ".join(self.reasons),
-                "submitted": a.date_submitted.date().isoformat() if a.date_submitted else ""}
-
-
-async def _field_popularity(field_ids: set[str]) -> dict[str, int]:
-    if not field_ids:
-        return {}
+async def candidates(cycle: str | None = None) -> list[dict[str, Any]]:
+    cycle = cycle or current_cycle()
+    ledger = await db.kv_get(LEDGER_KEY, []) or []
     async with db.session() as s:
-        rows = (await s.execute(select(DataField.id, DataField.alpha_count).where(
-            DataField.id.in_(list(field_ids)), DataField.region == REGION))).all()
-    out: dict[str, int] = {}
-    for fid, n in rows:
-        out[fid] = max(out.get(fid, 0), int(n or 0))
-    return out
+        alphas = list(await s.scalars(select(Alpha).where(Alpha.status == "ACTIVE")))
+    rows = []
+    for a in alphas:
+        state, reason = eligibility(a, cycle, ledger)
+        if state == "excluded" and (a.region or "") != settings.aqp.region:
+            continue                                  # other regions are not part of this list at all
+        draft = await db.kv_get(DRAFT_KEY.format(a.id))
+        rows.append({"id": a.id, "code": a.code or "", "state": state, "reason": reason, "is_sharpe": a.sharpe,
+                     "turnover": a.turnover, "ops": a.op_count, "fields": len(a.fields or []), "cluster": a.cluster,
+                     "draft_ok": bool(draft and draft.get("ok")), "has_draft": bool(draft),
+                     "description_chars": len(a.description or ""), **score_alpha(a)})
+    rows.sort(key=lambda r: ({"selected": 0, "eligible": 1, "used": 2, "excluded": 3}[r["state"]], -r["score"]))
+    return rows
 
 
-async def eligible(tag: str | None = None) -> list[Candidate_]:
-    """Submitted USA regular alphas not tagged in an earlier cycle, best estimate first (the cycle's own picks first)."""
-    tag = (tag or cycle_tag()).upper()
-    async with db.session() as s:
-        rows = list(await s.scalars(select(Alpha).where(Alpha.status == "ACTIVE", Alpha.region == REGION,
-                                                        Alpha.type == "REGULAR", Alpha.code.is_not(None))))
-    rows = [a for a in rows if not tagged_before(a, tag)]
-    pop = await _field_popularity({f for a in rows for f in (a.fields or [])})
-    out = []
-    for a in rows:
-        perf, uniq = performance_score(a), distinctiveness(a, pop)
-        # the description is 80% and is written by the app, so pick on what the description can draw on (a
-        # distinctive idea) and on the 20% it cannot change (out-of-sample performance)
-        est = 0.55 * uniq + 0.45 * perf
-        reasons = []
-        if a.os_sharpe is not None:
-            reasons.append(f"OS Sharpe {a.os_sharpe:.2f}")
-        elif a.sharpe is not None:
-            reasons.append(f"IS Sharpe {a.sharpe:.2f} (no OS yet)")
-        corr = a.self_corr if a.self_corr is not None else a.est_self_corr
-        if corr is not None:
-            reasons.append(f"self-corr {corr:.2f}")
-        out.append(Candidate_(a, perf, uniq, est, in_cycle(a, tag), reasons))
-    out.sort(key=lambda c: (not c.in_cycle, -c.estimate))
-    return out
+def pick_best(rows: list[dict[str, Any]], n: int | None = None) -> list[str]:
+    """The best `n` eligible alphas, from different idea families where there are enough of them."""
+    n = n or settings.aqp.max_picks
+    pool = [r for r in rows if r["state"] in ("eligible", "selected")]
+    pool.sort(key=lambda r: (r["state"] != "selected", -r["score"]))     # this cycle's picks stay picked
+    picked: list[dict[str, Any]] = []
+    for r in pool:
+        if len(picked) < n and (not r["cluster"] or r["cluster"] not in {p["cluster"] for p in picked}):
+            picked.append(r)
+    for r in pool:                                    # not enough distinct families: fill with the next best
+        if len(picked) < n and r not in picked:
+            picked.append(r)
+    return [r["id"] for r in picked]
 
 
-def pick(cands: list[Candidate_], n: int = MAX_PER_CYCLE) -> list[Candidate_]:
-    """Greedy diverse pick: the alphas already in this cycle stay; then the best estimate whose economic idea
-    (cluster) and field set differ from those already picked."""
-    chosen = [c for c in cands if c.in_cycle][:n]
-    for c in cands:
-        if len(chosen) >= n:
-            break
-        if c in chosen:
-            continue
-        same_idea = any(c.alpha.cluster and c.alpha.cluster == p.alpha.cluster for p in chosen)
-        same_fields = any(set(c.alpha.fields or []) and set(c.alpha.fields or []) == set(p.alpha.fields or [])
-                          for p in chosen)
-        if same_idea or same_fields:
-            continue
-        chosen.append(c)
-    for c in cands:                        # not enough distinct ideas: fill with the best remaining
-        if len(chosen) >= n:
-            break
-        if c not in chosen:
-            chosen.append(c)
-    return chosen
+# ---------------------------------------------------------------- the literal "does it match the expression" check
+
+def expression_terms(code: str) -> tuple[list[str], list[str], list[str]]:
+    """(operators, fields/groups, numbers) the description has to cover. Assigned names and keyword arguments are not."""
+    ops, names, assigned = [], [], set()
+    text = code or ""
+    for m in _TOKEN.finditer(text):
+        word, rest = m.group(0), text[m.end():].lstrip()
+        if rest.startswith("("):
+            ops.append(word)
+        elif rest.startswith("=") and not rest.startswith("=="):
+            assigned.add(word)
+        elif word.lower() not in _RESERVED:
+            names.append(word)
+    dedupe = lambda xs: list(dict.fromkeys(xs))  # noqa: E731
+    numbers = dedupe(n for n in _NUMBER.findall(text) if n not in ("0", "1"))
+    return dedupe(ops), dedupe(n for n in names if n not in assigned), numbers
 
 
-# ---------------------------------------------------------------- descriptions
-
-@dataclass
-class Facts:
-    fields: list[str]
-    operators: list[str]
-    windows: list[int]
-    groups: list[str]
-    field_notes: dict[str, str]
-    datasets: list[str]
+def _mentions(text: str, term: str) -> bool:
+    return bool(re.search(rf"(?<![A-Za-z0-9_]){re.escape(term)}(?![A-Za-z0-9_])", text, re.I))
 
 
-async def expression_facts(a: Alpha) -> Facts:
-    try:
-        m = compute_metrics(a.code or "")
-        ops, wins, mfields = sorted(m.unique_operators), sorted(set(m.windows)), set(m.fields)
-    except Exception:                         # unparsable code: fall back to what BRAIN reported
-        ops, wins, mfields = [], [], set()
-    fields = sorted(mfields | set(a.fields or []))
-    groups = sorted({g for g in GROUPS if re.search(rf"\b{g}\b", a.code or "")})
-    fields = [f for f in fields if f not in GROUPS]
-    notes: dict[str, str] = {}
-    datasets: set[str] = set()
-    if fields:
-        async with db.session() as s:
-            rows = list(await s.scalars(select(DataField).where(DataField.id.in_(fields), DataField.region == REGION)))
-            ds_ids = {r.dataset_id for r in rows if r.dataset_id}
-            ds_rows = list(await s.scalars(select(Dataset).where(Dataset.id.in_(list(ds_ids)),
-                                                                 Dataset.region == REGION))) if ds_ids else []
-        for r in rows:
-            if r.description and r.id not in notes:
-                notes[r.id] = r.description
-        datasets = {f"{d.id} ({d.name})" if d.name else d.id for d in ds_rows}
-    return Facts(fields=fields, operators=ops, windows=wins, groups=groups,
-                 field_notes=notes, datasets=sorted(datasets))
+def coverage(description: str, code: str) -> dict[str, Any]:
+    ops, names, numbers = expression_terms(code)
+    terms = ops + names
+    missing = [t for t in terms if not _mentions(description, t)]
+    missing_numbers = [n for n in numbers if not _mentions(description, n)]
+    return {"terms": len(terms), "missing": missing, "missing_numbers": missing_numbers,
+            "share": 1.0 if not terms else 1 - len(missing) / len(terms)}
 
 
-def match_check(text: str, facts: Facts, settings: dict[str, Any] | None = None) -> list[str]:
-    """Deterministic match problems: parts of the expression the description never mentions."""
-    low = (text or "").lower()
+def similarity(a: str, b: str) -> float:
+    x, y = set(_WORDS.findall(a.lower())), set(_WORDS.findall(b.lower()))
+    return len(x & y) / len(x | y) if x | y else 0.0
+
+
+def check_description(text: str, code: str) -> dict[str, Any]:
+    """The pre-checks that need no AI: length and the literal coverage of the expression."""
+    cov = coverage(text, code)
     problems = []
-    for f in facts.fields:
-        if f.lower() not in low:
-            problems.append(f"field {f} is not described")
-    for op in facts.operators:
-        if op.startswith(("add", "subtract", "multiply", "divide", "reverse", "less", "greater", "equal", "not",
-                          "and", "or", "if_else")):
-            continue                        # arithmetic needs no prose of its own
-        if op.lower() not in low:
-            problems.append(f"operator {op} is not explained")
-    for w in facts.windows:
-        if w >= 2 and not re.search(rf"\b{w}\b", low):
-            problems.append(f"window {w} is not justified")
-    for g in facts.groups:
-        if g not in low:
-            problems.append(f"grouping by {g} is not explained")
-    neut = str((settings or {}).get("neutralization") or "").lower()
-    if neut and neut not in ("none",) and neut not in low:
-        problems.append(f"{neut} neutralization is not mentioned")
-    return problems
+    if len(text) < settings.aqp.min_description_chars:
+        problems.append(f"{len(text)} characters; at least {settings.aqp.min_description_chars} needed to explain every "
+                        "field and operator.")
+    if cov["missing"]:
+        problems.append("Does not name: " + ", ".join(cov["missing"]) + ".")
+    return {"ok": not problems, "problems": problems, "chars": len(text), **cov}
 
 
-def _prompt(a: Alpha, facts: Facts, *, feedback: str = "", previous: str = "") -> str:
-    notes = "\n".join(f"- {f}: {facts.field_notes.get(f, '(no catalogue description)')}" for f in facts.fields)
-    return f"""TASK: Write the description for WorldQuant BRAIN's Alpha Quality Project (AQP). It is scored on (1) how
-exactly it matches the expression, (2) how unique the idea is, (3) the quality of the hypothesis. Be concrete and
-technical; every claim must be verifiable from the expression. Do not invent fields, operators, windows or data.
+# ---------------------------------------------------------------- writing the description
 
-Expression: {a.code}
-Settings: {pack.settings_text(a.settings or {})}
-Fields and what they measure:
-{notes or '- (none)'}
-Datasets: {', '.join(facts.datasets) or 'unknown'}
-Operators used: {', '.join(facts.operators)}
-Windows used: {', '.join(map(str, facts.windows)) or 'none'}
-Groupings used: {', '.join(facts.groups) or 'none'}
-In-sample: Sharpe {a.sharpe}, Fitness {a.fitness}, Turnover {a.turnover}, Returns {a.returns}
-Economic idea cluster (app's guess): {a.cluster or 'unknown'}
+class AQPDescription(BaseModel):
+    idea: str = Field(description=("The hypothesis: mechanism, who is wrong or paid, "
+                           "expected sign and horizon (4 to 7 sentences)"))
+    rationale_data: str = Field(description="One short paragraph per field: what it measures and why it is informative here")
+    rationale_operators: str = Field(description=("The expression walked through in evaluation "
+                                          "order, every operator and window explained"))
+    different: str = Field(description=("What differs from the textbook version of "
+                                "this idea and from the other alphas listed"))
+    risks: str = Field(description="When it should fail, and what to expect in those regimes")
 
-Requirements:
-- Name every field, explain every non-arithmetic operator and justify every window and grouping, in the order the
-  expression applies them, including the sign (which stocks are bought, which are sold).
-- State a falsifiable hypothesis: who misprices what, why, and why it corrects over the holding horizon implied by the
-  windows and turnover.
-- Say what is distinctive versus textbook factors (momentum, value, size, low-vol) without overclaiming.
-- No marketing language, no performance promises.
-{('Feedback on your previous version (fix all of it):' + chr(10) + feedback) if feedback else ''}
-{('Previous version:' + chr(10) + previous) if previous else ''}
+    def render(self) -> str:
+        return (f"Idea: {self.idea.strip()}\n\nRationale for data used: {self.rationale_data.strip()}\n\n"
+                f"Rationale for operators used: {self.rationale_operators.strip()}\n\n"
+                f"What makes it different: {self.different.strip()}\n\nExpected behaviour and risks: {self.risks.strip()}")
+
+
+class AQPGrade(BaseModel):
+    match: int = Field(description="0-10: does the description say exactly what the expression computes")
+    uniqueness: int = Field(description=("0-10: does it say what is different from "
+                                 "the standard version and from the other alphas"))
+    hypothesis: int = Field(description=("0-10: is the mechanism specific, plausible, "
+                                 "testable and honest about failure regimes"))
+    gaps: list[str] = Field(default_factory=list, description="Concrete things to fix, most important first")
+
+
+DESCRIBE_TEMPLATE = """\
+You write the description of a WorldQuant BRAIN alpha for the Alpha Quality Project. Reviewers score it on:
+1. MATCH: every field, operator, window, group and setting in the expression is explained, and the text says what the
+   expression really computes, in evaluation order.
+2. UNIQUENESS: it says what is different from the textbook version of this idea and from the other alphas listed below.
+3. HYPOTHESIS: a specific, testable economic or behavioural mechanism: who is wrong or paid, why the effect persists, in
+   which regimes it fails, which sign and horizon to expect.
+Be concrete and accurate. Never claim anything the expression does not do. Do not invent facts about the data: use the
+field descriptions given. No marketing language and no performance numbers. Use the literal name of every field and every
+operator, and mention the window lengths and the neutralization.
+
+Expression: {code}
+Settings: {settings}
+Fields:
+{fields}
+Idea family: {cluster}
+Other alphas described this cycle (this one must be clearly different from them):
+{others}
+{revision}
+Write at least {min_chars} characters in total. Return JSON matching the schema."""
+
+REVISION_TEMPLATE = """\
+YOUR PREVIOUS ATTEMPT:
+{previous}
+
+WHAT MUST CHANGE (measured; fix exactly these, keep what already works):
+{gaps}
+"""
+
+JUDGE_TEMPLATE = """\
+You are a strict reviewer of WorldQuant BRAIN alpha descriptions. Score the description of this alpha out of 10 on each of:
+match (it says exactly what the expression computes, field by field, operator by operator),
+uniqueness (it says what differs from the standard version of the idea and from the other alphas),
+hypothesis (specific, plausible, testable mechanism; names failure regimes). Be harsh: 7 means good, 9 is rare.
+List concrete gaps, most important first.
+
+Expression: {code}
+Settings: {settings}
+Other alphas this cycle: {others}
+
+DESCRIPTION:
+{description}
+
 Return JSON matching the schema."""
 
 
-def _grade_prompt(a: Alpha, text: str) -> str:
-    return f"""You grade descriptions for WorldQuant BRAIN's Alpha Quality Project. Be strict.
-Expression: {a.code}
-Settings: {pack.settings_text(a.settings or {})}
-
-Description:
-{text}
-
-Score match (every claim corresponds to the expression; nothing in the expression is left unexplained), uniqueness
-(originality versus standard factors) and hypothesis quality (clear, economically grounded, falsifiable). List every
-mismatch and the concrete improvements. Return JSON matching the schema."""
+async def _field_notes(a: Alpha) -> str:
+    names = list(a.fields or [])
+    if not names:
+        return "(none recorded)"
+    async with db.session() as s:
+        rows = list(await s.scalars(select(DataField).where(DataField.id.in_(names), DataField.region == a.region)))
+    desc = {r.id: (r.description or "").strip() for r in rows}
+    return "\n".join(f"- {n}: {desc.get(n) or 'no description synced'}" for n in names)
 
 
-def total(grade: DescriptionGrade, problems: list[str]) -> float:
-    """0–10 description score: the AI's three grades with the deterministic match problems as a penalty."""
-    match = max(0.0, grade.match - 1.0 * len(problems))
-    return round((match * 0.45 + grade.uniqueness * 0.25 + grade.hypothesis_quality * 0.30), 2)
+def _settings_text(a: Alpha) -> str:
+    s = a.settings or {}
+    keys = ("region", "universe", "delay", "neutralization", "decay", "truncation")
+    return ", ".join(f"{k}={s.get(k)}" for k in keys if s.get(k) is not None) or "defaults"
 
 
-def fallback(a: Alpha, facts: Facts, hypothesis: str | None) -> str:
-    fields = ", ".join(facts.fields) or "the selected data fields"
-    notes = "; ".join(f"{f} measures {facts.field_notes[f]}" for f in facts.fields if f in facts.field_notes)
-    neut = (a.settings or {}).get("neutralization", "")
-    return "\n\n".join([
-        f"Idea: {hypothesis or 'A cross-sectional signal built from ' + fields + '.'}",
-        f"Rationale for data used: {notes or fields}.",
-        f"Rationale for operators used (construction): the expression {a.code} applies "
-        f"{', '.join(facts.operators)}" + (f" over windows of {', '.join(map(str, facts.windows))} days" if
-                                           facts.windows else "")
-        + (f", compares stocks within {', '.join(facts.groups)}" if facts.groups else "")
-        + (f", and is neutralized by {neut.lower()}" if neut else "") + ".",
-        "Risks and limitations: the signal can weaken when the information becomes widely used or in regimes where "
-        "the underlying behaviour changes.",
-    ])
+async def _others_text(alpha_ids: list[str], skip: str) -> str:
+    out = []
+    for aid in alpha_ids:
+        if aid == skip:
+            continue
+        async with db.session() as s:
+            o = await s.get(Alpha, aid)
+        if o:
+            out.append(f"- {o.code} ({o.cluster or 'unclassified'})")
+    return "\n".join(out) or "(none)"
 
 
-async def write_description(alpha_id: str) -> dict[str, Any]:
-    """Write, grade and rewrite an AQP description. Returns {text, grade, problems, score, rounds}."""
+async def write_description(alpha_id: str, *, others: list[str] | None = None,
+                            rounds: int | None = None) -> dict[str, Any]:
+    """Draft, pre-check, rewrite on failure. Returns and stores {text, ok, checks, grade, rounds}."""
+    cfg = settings.aqp
     async with db.session() as s:
         a = await s.get(Alpha, alpha_id)
-        cand = await s.get(Candidate, a.candidate_id) if a and a.candidate_id else None
-    if a is None:
+    if a is None or not a.code:
         raise ValueError(f"Unknown alpha {alpha_id}")
-    facts = await expression_facts(a)
-    if not llm.configure():
-        text = fallback(a, facts, cand.hypothesis if cand else None)
-        problems = match_check(text, facts, a.settings)
-        return {"text": text, "grade": None, "problems": problems, "score": None, "rounds": 0,
-                "note": "No AI provider set up: a template description was written. Set one up for a scored one."}
-    best: dict[str, Any] | None = None
-    feedback, previous = "", ""
-    for rounds in range(1, MAX_REWRITES + 2):
-        desc = await llm.generate_json(_prompt(a, facts, feedback=feedback, previous=previous), AQPDescription,
-                                       role="describe", purpose="aqp_describe", thinking="medium")
-        text = desc.render()
-        problems = match_check(text, facts, a.settings)
-        try:
-            grade = await llm.generate_json(_grade_prompt(a, text), DescriptionGrade, role="refine",
-                                            purpose="aqp_grade", thinking="low")
-        except Exception as exc:              # the judge is advisory: keep the description
-            log.warning("AQP grading failed: %s", exc)
-            grade = DescriptionGrade(match=7, uniqueness=6, hypothesis_quality=6)
-        score = total(grade, problems)
-        current = {"text": text, "grade": grade.model_dump(), "problems": problems, "score": score,
-                   "rounds": rounds}
-        if best is None or score > best["score"]:
-            best = current
-        elif score <= best["score"]:
-            break                             # no longer improving
-        if score >= 9.0 and not problems:
+    fields, others_txt = await _field_notes(a), await _others_text(others or [], alpha_id)
+    base = dict(code=a.code, settings=_settings_text(a), fields=fields, cluster=a.cluster or "unclassified",
+                others=others_txt, min_chars=cfg.min_description_chars)
+    neut = str((a.settings or {}).get("neutralization") or "").strip()
+    text, gaps, result = "", [], {}
+    for rnd in range(1, (cfg.max_rounds if rounds is None else rounds) + 2):
+        revision = REVISION_TEMPLATE.format(previous=text, gaps="\n".join(f"- {g}" for g in gaps)) if gaps else ""
+        draft = await llm.generate_json(DESCRIBE_TEMPLATE.format(revision=revision, **base), AQPDescription,
+                                        role="describe", purpose="aqp_describe", thinking="medium")
+        text = draft.render()
+        check = check_description(text, a.code)
+        grade = await llm.generate_json(JUDGE_TEMPLATE.format(code=a.code, settings=base["settings"], others=others_txt,
+                                                              description=text), AQPGrade, role="refine",
+                                        purpose="aqp_judge", thinking="low")
+        low = [n for n, v in (("match", grade.match), ("uniqueness", grade.uniqueness), ("hypothesis", grade.hypothesis))
+               if v < cfg.min_grade]
+        gaps = list(check["problems"]) + ([f"Judge scores below {cfg.min_grade}/10: {', '.join(low)}."] if low else []) \
+            + list(grade.gaps[:4] if (low or check["problems"]) else [])
+        if check["missing_numbers"]:
+            gaps.append("Mention the window lengths / constants: " + ", ".join(check["missing_numbers"]) + ".")
+        if neut and neut.upper() != "NONE" and not _mentions(text, neut):
+            gaps.append(f"Explain why the signal is {neut.lower()}-neutralized.")
+        ok = check["ok"] and not low
+        result = {"alpha_id": alpha_id, "text": text, "ok": ok, "rounds": rnd, "checks": check,
+                  "grade": {"match": grade.match, "uniqueness": grade.uniqueness, "hypothesis": grade.hypothesis,
+                            "gaps": grade.gaps[:4]}, "at": datetime.now(timezone.utc).isoformat()}
+        if ok:
             break
-        feedback = "\n".join([f"- {p}" for p in problems] + [f"- mismatch: {m}" for m in grade.mismatches]
-                             + [f"- improve: {i}" for i in grade.improvements])
-        previous = text
-    await db.kv_set(f"aqp:draft:{alpha_id}", {**best, "at": datetime.now(timezone.utc).isoformat()})
-    return best
+    await db.kv_set(DRAFT_KEY.format(alpha_id), result)
+    return result
 
 
-async def draft(alpha_id: str) -> dict[str, Any] | None:
-    return await db.kv_get(f"aqp:draft:{alpha_id}")
-
-
-def estimated_score(description_score: float | None, performance: float) -> float | None:
-    """Expected AQP score (0–100) from the 0–10 description grade and the 0–1 performance estimate."""
-    if description_score is None:
-        return None
-    return round(100 * (DESCRIPTION_WEIGHT * description_score / 10 + PERFORMANCE_WEIGHT * performance), 1)
-
-
-# ---------------------------------------------------------------- apply on BRAIN
-
-async def apply(alpha_id: str, description: str, tag: str | None = None) -> dict[str, Any]:
-    """Tag the alpha with the cycle tag and set its description on BRAIN. Refuses past 3 alphas a cycle and alphas
-    tagged in an earlier cycle."""
-    tag = (tag or cycle_tag()).upper()
-    if not TAG_RE.match(tag):
-        raise ValueError(f"{tag} is not an AQP cycle tag (AQP + YYYYMM).")
-    if len((description or "").strip()) < 200:
-        raise ValueError("Write a detailed description first (at least 200 characters).")
+async def recheck_text(alpha_id: str, text: str) -> dict[str, Any]:
+    """The no-AI pre-checks for text the user edited, stored back as the draft (the AI judge scores are kept, marked
+    as from before the edit)."""
     async with db.session() as s:
         a = await s.get(Alpha, alpha_id)
-        tagged = list(await s.scalars(select(Alpha).where(Alpha.status == "ACTIVE", Alpha.region == REGION)))
     if a is None:
         raise ValueError(f"Unknown alpha {alpha_id}")
-    if a.region != REGION or str(a.status).upper() != "ACTIVE":
-        raise ValueError("AQP takes submitted USA alphas only.")
-    if tagged_before(a, tag):
-        raise ValueError(f"{alpha_id} was tagged in an earlier AQP cycle and cannot be tagged again.")
-    in_now = [x.id for x in tagged if in_cycle(x, tag)]
-    if alpha_id not in in_now and len(in_now) >= MAX_PER_CYCLE:
-        raise ValueError(f"{tag} already has {MAX_PER_CYCLE} alphas ({', '.join(in_now)}). Remove one on BRAIN first.")
-    tags = list(dict.fromkeys([*(a.tags or []), tag]))
-    body = await brain.alphas.patch(alpha_id, tags=tags, regular_description=description.strip())
-    async with db.write() as s:
-        row = await s.get(Alpha, alpha_id)
-        if row:
-            row.tags = (body or {}).get("tags", tags) if isinstance(body, dict) else tags
-            row.description = description.strip()
-    return {"alpha_id": alpha_id, "tag": tag, "tags": tags}
+    prev = await db.kv_get(DRAFT_KEY.format(alpha_id)) or {}
+    check = check_description(text, a.code or "")
+    result = {**prev, "alpha_id": alpha_id, "text": text, "checks": check, "ok": check["ok"] and bool(prev.get("grade")),
+              "edited": True, "at": datetime.now(timezone.utc).isoformat()}
+    if prev.get("grade"):
+        g = prev["grade"]
+        result["ok"] = check["ok"] and min(g["match"], g["uniqueness"], g["hypothesis"]) >= settings.aqp.min_grade
+    await db.kv_set(DRAFT_KEY.format(alpha_id), result)
+    return result
+
+
+# ---------------------------------------------------------------- applying (description + tag, confirmed only)
+
+async def validate_cycle(cycle: str, items: list[dict[str, str]]) -> list[str]:
+    """Every reason the batch cannot be applied. Nothing is written when this is not empty."""
+    cfg, errors = settings.aqp, []
+    if not cycle_pattern().match(cycle or ""):
+        return [f"The cycle tag must look like {cfg.tag_prefix}YYYYMM (got {cycle!r})."]
+    if not items:
+        return ["Pick at least one alpha."]
+    ids = [i["alpha_id"] for i in items]
+    if len(set(ids)) != len(ids):
+        errors.append("The same alpha was picked twice.")
+    ledger = await db.kv_get(LEDGER_KEY, []) or []
+    async with db.session() as s:
+        tagged = list(await s.scalars(select(Alpha).where(Alpha.status == "ACTIVE")))
+    already = sum(1 for a in tagged if cycle in (a.tags or []) and a.id not in ids)
+    if already + len(set(ids)) > cfg.max_picks:
+        errors.append(f"{cycle} allows {cfg.max_picks} alphas; {already} already tagged plus {len(set(ids))} new.")
+    for it in items:
+        async with db.session() as s:
+            a = await s.get(Alpha, it["alpha_id"])
+        if a is None:
+            errors.append(f"{it['alpha_id']}: unknown alpha.")
+            continue
+        state, reason = eligibility(a, cycle, ledger)
+        if state not in ("eligible", "selected"):
+            errors.append(f"{a.id}: {reason}")
+        chk = check_description(it.get("description") or "", a.code or "")
+        errors += [f"{a.id}: {p}" for p in chk["problems"]]
+    for i in range(len(items)):
+        for j in range(i + 1, len(items)):
+            sim = similarity(items[i].get("description", ""), items[j].get("description", ""))
+            if sim > cfg.max_similarity:
+                errors.append(f"{items[i]['alpha_id']} and {items[j]['alpha_id']}: descriptions overlap {sim:.0%} "
+                              f"(at most {cfg.max_similarity:.0%}); each alpha needs its own idea.")
+    return errors
+
+
+async def apply_cycle(cycle: str, items: list[dict[str, str]], *, confirmed: bool) -> str:
+    """Write each description and add the cycle tag. `confirmed` must come from the user's click."""
+    if not confirmed:
+        raise PermissionError("Tagging and describing requires explicit user confirmation.")
+    for it in items:                                   # fresh tags and status from BRAIN before judging anything
+        await actions.refresh_alpha(it["alpha_id"])
+    errors = await validate_cycle(cycle, items)
+    if errors:
+        raise RuntimeError("Nothing was written. " + " ".join(errors[:6]))
+    done: list[str] = []
+    for it in items:
+        aid = it["alpha_id"]
+        async with db.session() as s:
+            a = await s.get(Alpha, aid)
+        await db.kv_set(BACKUP_KEY.format(aid), {"description": a.description, "tags": list(a.tags or []),
+                                                  "at": datetime.now(timezone.utc).isoformat()})
+        tags = list(a.tags or [])
+        if cycle not in tags:
+            tags.append(cycle)
+        try:
+            await actions.set_properties(aid, tags=tags, regular_description=it["description"])
+        except Exception as exc:
+            msg = getattr(exc, "message", None) or str(exc)
+            written = f" Already written: {', '.join(done)}." if done else " Nothing was written."
+            bus.publish("sync", f"AQP {cycle}: writing {aid} failed: {msg}.{written}", "error")
+            raise RuntimeError(f"Writing {aid} to BRAIN failed: {msg}.{written} Retry when BRAIN answers again; the "
+                               "alphas already written stay tagged.") from exc
+        ledger = await db.kv_get(LEDGER_KEY, []) or []
+        await db.kv_set(LEDGER_KEY, [*ledger, {"cycle": cycle, "alpha_id": aid,
+                                                "ts": datetime.now(timezone.utc).isoformat()}])
+        done.append(aid)
+    bus.publish("sync", f"AQP {cycle}: described and tagged {', '.join(done)}.", "success")
+    return f"{cycle}: described and tagged {len(done)} alpha(s): {', '.join(done)}"
+
+
+async def untag_cycle(cycle: str, alpha_ids: list[str], *, confirmed: bool) -> str:
+    """Remove the current cycle's tag (the description stays). Only that cycle's tag is ever removed."""
+    if not confirmed:
+        raise PermissionError("Untagging requires explicit user confirmation.")
+    if not cycle_pattern().match(cycle or ""):
+        raise ValueError(f"The cycle tag must look like {settings.aqp.tag_prefix}YYYYMM.")
+    for aid in alpha_ids:
+        a = await actions.refresh_alpha(aid)
+        await actions.set_properties(aid, tags=[t for t in (a.tags or []) if t != cycle])
+    ledger = await db.kv_get(LEDGER_KEY, []) or []
+    await db.kv_set(LEDGER_KEY, [e for e in ledger if not (e.get("cycle") == cycle and e.get("alpha_id") in alpha_ids)])
+    return f"Removed {cycle} from {len(alpha_ids)} alpha(s)."
+
+
+# ---------------------------------------------------------------- jobs
+
+@jobs.register("aqp_describe")
+async def _job_describe(ctx: JobContext, params: dict) -> str:
+    ids = list(params.get("alpha_ids") or [])
+    ok = 0
+    for i, aid in enumerate(ids, 1):
+        await ctx.update((i - 1) / max(1, len(ids)), f"Writing the description of {aid} ({i}/{len(ids)})")
+        try:
+            ok += bool((await write_description(aid, others=ids))["ok"])
+        except Exception as exc:
+            log.warning("AQP description for %s failed: %s", aid, exc)
+            bus.publish("sync", f"AQP description for {aid} failed: {getattr(exc, 'message', exc)}", "warning")
+    await ctx.update(1.0)
+    return f"{ok}/{len(ids)} descriptions passed every pre-check"
+
+
+@jobs.register("aqp_apply")
+async def _job_apply(ctx: JobContext, params: dict) -> str:
+    return await apply_cycle(str(params["cycle"]), list(params.get("items") or []),
+                             confirmed=bool(params.get("confirmed")))
+
+
+@jobs.register("aqp_untag")
+async def _job_untag(ctx: JobContext, params: dict) -> str:
+    return await untag_cycle(str(params["cycle"]), list(params.get("alpha_ids") or []),
+                             confirmed=bool(params.get("confirmed")))

@@ -13,6 +13,10 @@ _MODULES = [
     "alphago.engine.programs",     # pyramids, genius, power pool, osmosis, oos
     "alphago.engine.datasets",     # dataset analysis jobs
     "alphago.engine.pnl",          # "Prepare data": daily PnL of submitted alphas
+    "alphago.engine.spc_auto",     # SPC generation and submission jobs
+    "alphago.engine.aqp",          # Alpha Quality Project jobs
+    "alphago.engine.themes",       # BRAIN themes (GLB): theme data sync and checks
+    "alphago.engine.python_alpha",  # Python alphas: generate, check and simulate
 ]
 
 for _name in _MODULES:

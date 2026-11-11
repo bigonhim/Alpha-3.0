@@ -31,6 +31,17 @@ _ALPHA_IN_PATH = re.compile(r"/alphas/([A-Za-z0-9]+)")
 _pending: set[asyncio.Task] = set()
 
 
+def _is_spc_path(path: str) -> bool:
+    """True for the SPC submission endpoint set in SPC Lab ({competition} filled from the competition id)."""
+    from ..config import settings as _settings
+    rules = _settings.spc
+    spc_path = (rules.submit_path or "").split("?")[0].rstrip("/")
+    if not spc_path:
+        return False
+    spc_path = spc_path.replace("{competition}", rules.competition_id or "")
+    return path == spc_path
+
+
 def classify(method: str, path: str) -> str | None:
     """Audit action for a request, or None when it is not recorded."""
     m, p = method.upper(), path.split("?")[0].rstrip("/")
@@ -44,6 +55,8 @@ def classify(method: str, path: str) -> str | None:
         return "verification"
     if p == "/simulations" or p.endswith("/simulations"):
         return "simulate"
+    if m in ("POST", "PUT", "PATCH") and _is_spc_path(p):     # before "/submit": an SPC path may end with it
+        return "spc_submit"
     if p.endswith("/submit"):
         return "submit"
     if p.startswith("/tags"):

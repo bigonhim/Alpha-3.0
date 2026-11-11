@@ -393,6 +393,9 @@ class ResearchManager:
                 raise RuntimeError(f"No fields synced for {d} in {t.region}/D{t.delay}/{t.universe} — run "
                                    "'Sync everything for scope' first.")
         decay, neut, trunc, nan = settings_for_category(category)
+        from .themes import overrides as theme_overrides
+        forced = theme_overrides(t.theme, t.region)          # a BRAIN-theme task uses the theme's settings
+        neut, decay = forced.get("neutralization", neut), forced.get("decay", decay)
         allowed = brain.options.neutralizations(t.region)
         base = normalize_settings({**scope, "decay": decay, "neutralization": neut if neut in allowed else allowed[0],
                                    "truncation": trunc, "nanHandling": nan})
@@ -800,6 +803,8 @@ async def daily_scheduler() -> None:
                     bus.publish("autopilot", f"New BRAIN day: planned {len(ids)} research task(s)"
                                 + (" and started them." if settings.research.mode == "autopilot"
                                    else " — approve them on the Autopilot page."), "success" if ids else "info")
+            from .themes import maybe_plan_today
+            await maybe_plan_today()
         except Exception:
             log.exception("daily scheduler failed")
         await asyncio.sleep(300)

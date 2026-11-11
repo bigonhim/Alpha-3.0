@@ -14,6 +14,7 @@ from ...engine.datasets import scored_datasets
 from ...engine.research import KINDS, STAGES, autopilot_sims_today, research
 from ...llm.schemas import THEMES
 from ..components import badge, card, grid_options, notify_error, page_header, stage_bar, stat_tile
+from ..screening import screening_card
 from .simulation_matrix import RESULT_COLUMNS, batch_rows
 
 AUTOPILOT_WARNING = (
@@ -170,6 +171,8 @@ async def page() -> None:
         await refresh(force=True)
 
     auto.on_value_change(on_auto)
+
+    screening_card()
 
     # ------------------------------------------------------------ proposals
     proposals = card("w-full")

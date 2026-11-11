@@ -6,8 +6,9 @@ import json
 import logging
 import os
 from pathlib import Path
+from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 APP_NAME = "AlphaGo"
 
@@ -158,16 +159,85 @@ class SPCSettings(BaseModel):
     weight_field: str = ""            # if rows carry a weight, name the field (else equal weight)
     side_field: str = ""              # if rows carry long/short, name the field (values: long/short or 1/-1)
     benchmark: str = "SPY"
-    # submission gates
-    stability_runs: int = 2           # dry runs that must agree before submitting (1 = no stability gate)
-    min_overlap: float = 0.3          # lowest stock overlap allowed between any two dry runs
-    require_pnl: bool = False         # also require a Test PnL with ≥ 90% of tickers priced
-    # BRAIN endpoint (BRAIN publishes no SPC API: copy the request your browser sends on the SPC page, F12 → Network)
-    submit_path: str = ""             # e.g. /competitions/{competition}/submissions ({competition} = competition_id)
+    # --- AI generation (SPC Lab "Generate & check"): how many local runs, how strict the gates are
+    auto_runs: int = 3                # local runs of the prompt, for the form check and the stability gate
+    auto_max_rounds: int = 2          # AI rewrites of a prompt that fails a gate (0 = never rewrite)
+    auto_min_overlap: float = 0.5     # stability gate: mean pairwise stock overlap (Jaccard) between runs
+    auto_check_prices: bool = True    # ticker gate: every ticker must have Yahoo prices
+    auto_min_priced: float = 0.9      # ... at least this share of the tickers
+    auto_backtest_days: int = 0       # >0: also test the portfolio as of N days ago (the AI may know that period)
+    auto_min_excess: float = 0.0      # backtest gate: return minus benchmark must be at least this
+    # --- submission to BRAIN. BRAIN publishes no SPC endpoint: copy the path and body from the browser's network
+    # tab when you submit the form by hand once (or paste "Copy as cURL" into Import). Placeholders in string values:
+    # {prompt} {name} {model} {version} {frequency} {weight} {competition}; "{weight:num}" sends a number.
+    submit_path: str = ""             # e.g. "/competitions/{competition}/submissions" (empty = not set up)
     submit_method: str = "POST"
-    competition_id: str = ""
-    body_template: str = ('{"name": "{name}", "prompt": "{prompt}", "model": "{model}", "version": "{version}", '
-                          '"frequency": "{frequency}", "weight": "{weight}"}')
+    competition_id: str = ""          # fills {competition} in the path and body
+    submit_body: str = ('{"name": "{name}", "prompt": "{prompt}", "model": "{model}", "version": "{version}", '
+                        '"frequency": "{frequency}", "weight": "{weight}"}')
+    max_submits_per_day: int = 1      # app-side guard against double submitting
+    auto_submit: bool = False         # OFF by default: submit without the confirmation click once every gate passed
+
+    @model_validator(mode="before")
+    @classmethod
+    def _migrate(cls, data: Any) -> Any:
+        """settings.json files from before the split: body_template -> submit_body, min_overlap -> auto_min_overlap."""
+        if isinstance(data, dict):
+            data = dict(data)
+            if "body_template" in data and "submit_body" not in data:
+                data["submit_body"] = data.pop("body_template")
+            if "min_overlap" in data and "auto_min_overlap" not in data:
+                data["auto_min_overlap"] = data.pop("min_overlap")
+            if "stability_runs" in data and "auto_runs" not in data:
+                data["auto_runs"] = max(2, int(data.pop("stability_runs") or 2))
+        return data
+
+
+class AQPSettings(BaseModel):
+    """Alpha Quality Project: a monthly cycle where up to 3 USA alphas are tagged AQP<YYYYMM> and described. The scoring
+    (80% description, 20% out-of-sample performance) is BRAIN's; these knobs only set the app's own pre-checks."""
+    tag_prefix: str = "AQP"
+    region: str = "USA"
+    max_picks: int = 3
+    min_description_chars: int = 700      # pre-check: long enough to explain every field and operator
+    min_grade: int = 7                    # pre-check: each AI-judge score (match, uniqueness, hypothesis) out of 10
+    max_rounds: int = 2                   # AI rewrites of a description that fails a pre-check
+    max_similarity: float = 0.55          # the picked alphas' descriptions must be this different from each other
+
+
+class ThemeDef(BaseModel):
+    """One BRAIN theme (announced in the platform's notifications; BRAIN publishes no theme API). Alphas whose settings
+    and data match a theme earn its multiplier, and BRAIN's check reports the match as MATCHES_THEMES."""
+    name: str = "GLB"
+    enabled: bool = True
+    region: str = "GLB"
+    delay: int = 1
+    universe: str = "TOP3000"
+    neutralization: str = "COUNTRY"   # used by the theme's research tasks ("" = the dataset category's default)
+    decay: int = -1                   # -1 = the dataset category's default
+    dataset_ids: list[str] = Field(default_factory=list)   # empty = BRAIN's theme datasets (theme=true), else best rated
+    start: str = ""                   # YYYY-MM-DD, from the announcement (empty = open)
+    end: str = ""
+    multiplier: float = 1.0           # from the announcement (informational: BRAIN applies it, the app only ranks by it)
+    note: str = ""
+
+
+class ThemeSettings(BaseModel):
+    items: list[ThemeDef] = Field(default_factory=lambda: [ThemeDef()])
+    auto_daily: bool = False          # after each quota reset, plan one task per active theme (Assisted: for approval)
+    task_sims: int = 300              # simulations per theme task
+    task_cores: int = 2               # GLB allows fewer concurrent simulations than other regions
+    check_matches: bool = True        # run BRAIN's check on strong theme-scope alphas to read MATCHES_THEMES
+
+
+class PythonAlphaSettings(BaseModel):
+    """Alphas written in Python instead of FASTEXPR. BRAIN publishes no public spec: the app reads the allowed
+    `settings.language` values from OPTIONS /simulations and only simulates when your account offers a Python one."""
+    language: str = ""                # empty = detect from OPTIONS /simulations (a value containing "PYTHON")
+    reference: str = ""               # paste BRAIN's Python Alpha docs / an example here: the AI writes code against it
+    starter: str = ""                 # your template; the AI keeps its structure
+    max_chars: int = 20_000
+    ai_rounds: int = 2                # AI fixes of code that fails the local syntax/safety check
 
 
 class AlertSettings(BaseModel):
@@ -200,6 +270,9 @@ class AppSettings(BaseModel):
     research: ResearchSettings = Field(default_factory=ResearchSettings)
     programs: ProgramSettings = Field(default_factory=ProgramSettings)
     spc: SPCSettings = Field(default_factory=SPCSettings)
+    aqp: AQPSettings = Field(default_factory=AQPSettings)
+    themes: ThemeSettings = Field(default_factory=ThemeSettings)
+    python_alpha: PythonAlphaSettings = Field(default_factory=PythonAlphaSettings)
     autopilot_warning_accepted: bool = False
 
     @classmethod
