@@ -1,5 +1,6 @@
-"""LLM Integration — the active AI provider (Gemini, Claude, OpenAI / compatible, local Ollama), its key or server,
-models per role, pacing, usage and prompt templates."""
+"""LLM Integration — the active AI provider (Gemini, Claude, OpenAI / compatible, OpenRouter, the OpenAI-compatible
+providers from alpha-harness, local Ollama), its key or server, models per role, pacing, usage, the AI key pool with
+its models, budget and providers (`alphago.ai.screens`), the tournament and prompt templates."""
 
 from __future__ import annotations
 
@@ -9,6 +10,9 @@ from nicegui import ui
 from sqlalchemy import func, select
 
 from ... import credentials
+from ...ai import screens as ai_screens
+from ...ai.keys import keystore
+from ...ai.providers import COMPAT
 from ...config import settings
 from ...db import db
 from ...db.models import LLMCall
@@ -31,12 +35,20 @@ _ROLE_HELP = {"gemini": ("fast 'flash' model", "strongest model", "cheapest mode
               "ollama": ("auto: first installed model",) * 3}
 
 
-TYPED = ("openai", "ollama", "openrouter")      # providers where a model name may be typed in
+TYPED = ("openai", "ollama", "openrouter", *COMPAT)      # providers where a model name may be typed in
+_DEFAULT_HELP = ("auto: the set-up model with the largest daily budget (Models tab below)",) * 3
 
 
 def _role_cfg(provider: str):  # noqa: ANN202
-    """Where a provider's per-role model choices live (Gemini's stay at the top level of settings.llm)."""
-    return settings.llm if provider == "gemini" else getattr(settings.llm, provider)
+    """Where a provider's per-role model choices live (Gemini's stay at the top level of settings.llm; the
+    alpha-harness providers keep theirs in the database)."""
+    return settings.llm if provider == "gemini" else PROVIDERS[provider].cfg
+
+
+async def _save_roles(provider: str) -> None:
+    settings.save()
+    if provider in COMPAT:
+        await PROVIDERS[provider].save_settings()
 
 
 async def page() -> None:
@@ -66,6 +78,10 @@ async def page() -> None:
                         key_in = ui.input(_KEY_LABEL[name], password=True, password_toggle_button=True,
                                           placeholder="●●●●●●●● saved" if credentials.llm_key(name) else "").classes(
                             "w-full")
+                    if name in COMPAT:
+                        ui.label(f"{provider.label} takes keys only in the key pool: add one or more under "
+                                 "“AI keys, models & budget › Keys” below, set its models up under Models, then "
+                                 "test here.").classes("ag-muted text-sm")
                     if name == "openrouter":
                         free_sw = ui.switch("Free models only", value=cfg.openrouter.free_only)
                         free_sw.on_value_change(lambda e: (setattr(cfg.openrouter, "free_only", bool(e.value)),
@@ -93,6 +109,10 @@ async def page() -> None:
                         if key_in is not None and key_in.value:
                             credentials.set_llm_key(name, key_in.value.strip())
                             key_in.value = ""
+                            adopted = await keystore.adopt_saved_keys(cfg.daily_call_budget)
+                            if adopted:
+                                ui.notify("The key also joined the key pool as “Saved key”, so it rotates with your "
+                                          "other keys.")
                         provider.configure(credentials.llm_key(name))
                         await test()
 
@@ -112,7 +132,8 @@ async def page() -> None:
                     def forget_key() -> None:
                         credentials.set_llm_key(name, None)
                         provider.configure(None)
-                        ui.notify(f"{provider.label} key removed.")
+                        ui.notify(f"{provider.label} key removed from the form. A copy in the key pool stays until "
+                                  "you remove it under Keys below.", multi_line=True)
 
                     with ui.row().classes("gap-2"):
                         ui.button("Save & test", icon="key", on_click=save_and_test)
@@ -136,13 +157,18 @@ async def page() -> None:
                                          ).classes("ag-muted text-sm")
                             for (role, attr), help_ in zip((("Ideation (bulk ideas)", "ideation_model"),
                                                             ("Refinement (near misses)", "refine_model"),
-                                                            ("Descriptions", "describe_model")), _ROLE_HELP[name]):
+                                                            ("Descriptions", "describe_model")),
+                                                           _ROLE_HELP.get(name, _DEFAULT_HELP)):
                                 auto = provider.pick(attr.split("_")[0]) or "choose a model"
                                 sel = ui.select(options, value=getattr(rc, attr) if getattr(rc, attr) in options else "",
                                                 label=f"{role} — auto: {auto}", with_input=True,
                                                 new_value_mode="add-unique" if name in TYPED else None
                                                 ).classes("w-full")
-                                sel.on_value_change(lambda e, a=attr: (setattr(rc, a, e.value or ""), settings.save()))
+                                async def on_role(e, a=attr) -> None:  # noqa: ANN001
+                                    setattr(rc, a, e.value or "")
+                                    await _save_roles(name)
+
+                                sel.on_value_change(on_role)
                                 sel.tooltip(help_)
                             think = ui.select({"minimal": "minimal", "low": "low", "medium": "medium", "high": "high",
                                                "off": "off (older models)"}, value=cfg.thinking_level,
@@ -226,6 +252,8 @@ async def page() -> None:
 
             await refresh()
             ui.timer(10.0, refresh)
+
+    await ai_screens.render()
 
     from ...engine import tournament as tourney
     t = cfg.tournament

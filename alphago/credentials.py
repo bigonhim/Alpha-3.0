@@ -68,3 +68,26 @@ def set_llm_key(provider: str, key: str | None) -> None:
     name = _LLM_KEYS.get(provider)
     if name:
         _set(name, key)
+
+
+# ---------------------------------------------------------------- key pool (several keys per provider)
+# Each pooled key is its own Credential Manager entry, named by the id of its row in `ai_keys` (which holds only a
+# hint and a fingerprint). The single key per provider above stays readable exactly as before.
+
+def _pool_name(key_id: int) -> str:
+    return f"llm_pool_key_{int(key_id)}"
+
+
+def pool_key(key_id: int) -> str | None:
+    """The secret of pooled key `key_id`, or None when it is not (or no longer) in the Credential Manager."""
+    return _get(_pool_name(key_id))
+
+
+def set_pool_key(key_id: int, key: str | None) -> None:
+    """Store (or with None, delete) the secret of pooled key `key_id`."""
+    _set(_pool_name(key_id), key)
+
+
+def saved_llm_providers() -> list[str]:
+    """Providers whose single key (the pre-pool way of saving one) is set."""
+    return [p for p in _LLM_KEYS if llm_key(p)]

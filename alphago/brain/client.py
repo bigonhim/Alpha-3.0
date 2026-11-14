@@ -19,7 +19,15 @@ from urllib.parse import urljoin
 import httpx
 
 from ..config import BrainSettings
-from .errors import AuthError, BrainError, PersonaRequired, describe_error_body
+from .errors import (
+    AUTH_DETAIL_MESSAGES,
+    AuthError,
+    BrainError,
+    MaybeDelivered,
+    PersonaRequired,
+    describe_error_body,
+    detail_code,
+)
 from .quota import QuotaTracker
 from .ratelimit import RateGate, bucket_for
 from .slots import SlotManager
@@ -60,6 +68,11 @@ class BrainClient:
         self._persona_inquiry: tuple[str, str] | None = None   # (post_url, inquiry_id) for the legacy flow
         self.last_error: str | None = None
         self.on_state_change: Callable[[str], None] | None = None
+        # sign-in lockout guard: once BRAIN refused the stored login, nothing signs in on its own again until the
+        # person does (a loop of refused sign-ins can lock the account); silent sign-ins are also at most hourly
+        self.silent_off = False
+        self.last_silent_login = 0.0
+        self.persona_expired = False             # the identity check timed out on Persona's side (410)
         # observers see every response: (method, path, status, json body sent, final?, response or None) —
         # the Health page's counters and the audit log
         self.observers: list[Callable[..., None]] = []
@@ -127,9 +140,56 @@ class BrainClient:
         if not creds:
             self._set_state("logged_out")
             raise AuthError("No BRAIN credentials saved. Enter them on the 'Sync with BRAIN' page.")
+        if email and password:
+            self.silent_off = False            # the person typed them: they may be tried again
+        self.persona_expired = False
         async with self._login_lock:
-            response = await self.http.post("/authentication", auth=creds)
+            captcha = await self._solve_captcha()
+            if captcha:
+                response = await self.http.post("/authentication", auth=creds, json={"captcha": captcha})
+            else:
+                response = await self.http.post("/authentication", auth=creds)
             await self._handle_auth_response(response)
+
+    async def _solve_captcha(self) -> str | None:
+        """BRAIN's ALTCHA proof-of-work for sign-in, solved in a worker thread. None when BRAIN offers none (the
+        plain sign-in is then sent as before)."""
+        from .altcha import AltchaError, Challenge, solve
+        try:
+            response = await self.http.get("/captcha")
+        except Exception as exc:                     # no captcha endpoint reachable: sign in without one
+            log.debug("no captcha: %s", exc)
+            return None
+        body = self._json(response)
+        if response.status_code != 200 or not isinstance(body, dict) or "challenge" not in body:
+            return None
+        try:
+            solution = await asyncio.to_thread(solve, Challenge.from_payload(body))
+        except AltchaError as exc:
+            log.warning("BRAIN captcha unsolvable: %s", exc)
+            return None
+        log.info("BRAIN sign-in captcha solved in %d ms", solution.took_ms)
+        return solution.encode()
+
+    async def resume_session(self) -> bool:
+        """Restore the session cookie kept from the last run; True when BRAIN still accepts it (no sign-in, no
+        captcha, nothing counted toward a lockout). A dead cookie is cleared."""
+        from . import session_store
+        await self.start()
+        if not session_store.load(self.http.cookies):
+            return False
+        try:
+            left = await self.refresh_session()
+        except httpx.HTTPError:
+            return False
+        if left > self.cfg.relogin_threshold_s:
+            self._set_state("logged_in")
+            log.info("BRAIN session resumed (%.0f s left)", left)
+            return True
+        session_store.clear()
+        self.http.cookies.clear()
+        self._set_state("logged_out")
+        return False
 
     async def _handle_auth_response(self, response: httpx.Response) -> None:
         if response.status_code in (200, 201):
@@ -148,6 +208,7 @@ class BrainClient:
             self._persona_inquiry = None
             self.last_error = None
             self._set_state("logged_in")
+            self._keep_cookies()
             log.info("BRAIN login ok (user %s, %.0f s session)", self.user_id, self.seconds_left)
             return
         if response.status_code == 401 and response.headers.get("WWW-Authenticate", "").lower() == "persona":
@@ -156,7 +217,12 @@ class BrainClient:
             self._set_state("persona_required")
             raise PersonaRequired(self.persona_url)
         body = self._json(response)
-        self.last_error = describe_error_body(body) or f"HTTP {response.status_code}"
+        code = detail_code(body)
+        self.last_error = AUTH_DETAIL_MESSAGES.get(code) or describe_error_body(body) or f"HTTP {response.status_code}"
+        if isinstance(body, dict) and "captcha" in body and not code:
+            self.last_error = "BRAIN rejected the sign-in captcha. Please try again."     # not a refusal
+        if response.status_code in (400, 401, 403) and code and code != "INQUIRY_INCOMPLETE":
+            self.silent_off = True
         if response.status_code in (401, 403):
             self._set_state("error")
             raise AuthError(f"Login rejected: {self.last_error}", response.status_code, body)
@@ -187,7 +253,16 @@ class BrainClient:
                 self.persona_url = None
                 self._persona_inquiry = None
                 self._set_state("logged_in")
+                self._keep_cookies()
                 return True
+            if response.status_code == 410:
+                # Persona expired the check unfinished: asking again cannot succeed. A new check starts only
+                # when the person presses "Start a new check" (a fresh sign-in), never on its own.
+                self.persona_expired = True
+                self.last_error = "This identity check expired before it was finished. Start a new one."
+                return False
+            # INQUIRY_INCOMPLETE (or anything else): keep waiting on the same inquiry. Signing in again would
+            # mint a new one and strand the check the person is part-way through in the browser.
             await asyncio.sleep(interval_s)
         return False
 
@@ -202,6 +277,13 @@ class BrainClient:
             self._set_state("logged_out")
         return 0.0
 
+    def _keep_cookies(self) -> None:
+        from . import session_store
+        try:
+            session_store.save(self.http.cookies)
+        except Exception:
+            log.exception("could not keep the BRAIN session")
+
     async def logout(self) -> None:
         if self._http is not None:
             try:
@@ -209,7 +291,24 @@ class BrainClient:
             except httpx.HTTPError:
                 pass
         self.expiry_at = None
+        from . import session_store
+        session_store.clear()                    # signed out on purpose: do not resume it on the next start
+        self.silent_off = True                   # and do not sign back in on our own
         self._set_state("logged_out")
+
+    def may_sign_in_silently(self, min_gap_s: float = 3600.0) -> bool:
+        """A background sign-in is allowed: the stored login was not refused, and none ran in the last hour."""
+        if self.silent_off or self.state == "persona_required":
+            return False
+        return time.time() - self.last_silent_login >= min_gap_s
+
+    async def silent_login(self) -> bool:
+        """Sign in in the background if the lockout guard allows it. True when a sign-in was attempted."""
+        if not self.may_sign_in_silently():
+            return False
+        self.last_silent_login = time.time()
+        await self.login()
+        return True
 
     async def ensure_session(self) -> None:
         if self._login_lock.locked():       # a concurrent request is signing in: wait and reuse its session
@@ -241,8 +340,16 @@ class BrainClient:
         retries: int = 6,
         retry_statuses: tuple[int, ...] = (429, 500, 502, 504),
         authenticated: bool = True,
+        idempotent: bool | None = None,
+        headers: dict[str, str] | None = None,
+        timeout: float | None = None,
     ) -> httpx.Response:
-        """One API call with re-login on 401 and backoff on throttling / transient errors."""
+        """One API call with re-login on 401 and backoff on throttling / transient errors.
+
+        idempotent=False (default for POST) marks a request that must never run twice: a transport error that may
+        have reached BRAIN (anything but a failed connect) raises MaybeDelivered instead of resending."""
+        if idempotent is None:
+            idempotent = method.upper() != "POST"
         await self.start()
         if authenticated:
             await self.ensure_session()
@@ -253,8 +360,15 @@ class BrainClient:
         while True:
             await self.gate.acquire(bucket)
             try:
-                response = await self.http.request(method, url, params=params, json=json)
+                response = await self.http.request(
+                    method, url, params=params, json=json, headers=headers,
+                    **({"timeout": httpx.Timeout(timeout, connect=20.0)} if timeout else {}))
             except (httpx.TransportError, httpx.TimeoutException) as exc:
+                if not idempotent and not isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout,
+                                                            httpx.PoolTimeout)):
+                    self._observe(method, url, 0, json, True, None)
+                    raise MaybeDelivered(f"No answer from BRAIN to {method} {url} ({exc.__class__.__name__}); "
+                                         "it may have arrived, so it is not resent.") from exc
                 attempt += 1
                 self._observe(method, url, 0, json, attempt > retries, None)
                 if attempt > retries:

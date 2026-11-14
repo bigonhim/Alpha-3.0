@@ -17,7 +17,7 @@ from ...engine import sync as sync_engine
 from ...events import bus
 from ...jobs.queue import jobs
 from ...runtime import load_options_quietly
-from ..components import ago, card, fmt_duration, fmt_int, notify_error, page_header
+from ..components import ago, card, empty_state, fmt_duration, fmt_int, notify_error, page_header
 
 
 def _scope_selectors():
@@ -176,6 +176,8 @@ async def page() -> None:
                     notify_error(exc)
 
             ui.button("Refresh from BRAIN", icon="refresh", on_click=refresh_opts).props("flat")
+
+    await catalogue_matrix()
 
     with ui.row().classes("w-full gap-5 items-stretch"):
         # ---------------------------------------------------------- catalogue
@@ -348,3 +350,210 @@ async def alerts_and_background() -> None:
                                              settings.save()))
             ui.label(f"Command: {background.headless_command()}").classes("ag-mono text-xs ag-muted break-all")
             await refresh_status()
+
+
+# ---------------------------------------------------------------- the all-markets sync matrix
+
+_HALF = {"waiting": "background:#1b2536", "fetching": "background:#3b4a66", "fields": "background:#56657f",
+         "details": "background:#56657f;box-shadow:inset 0 0 0 1px #e6edf7", "done": "background:#d7dee9",
+         "failed": "background:#6b2633"}
+_PULSE = {"fetching", "details"}
+_NO_DELAY = "background:repeating-linear-gradient(135deg,#2a3850 0 1px,transparent 1px 5px)"
+
+
+def _market_states(synced: list[dict], run: dict | None) -> dict[tuple[str, int, str], dict]:
+    """While a sync runs its own per-market states are the truth; otherwise what the catalogue holds, plus any
+    market the last sync could not finish."""
+    states = {(r["region"], r["delay"], r["universe"]): {"state": "done", "fields": r["fields"]} for r in synced}
+    running = bool(run and run["status"] == "RUNNING")
+    for m in (run or {}).get("markets") or []:
+        key = (m["region"], int(m["delay"]), m["universe"])
+        if running or m["state"] in ("failed", "fields"):
+            states[key] = {"state": m["state"], "fields": m.get("fields") or states.get(key, {}).get("fields")}
+    return states
+
+
+def _running_text(run: dict, elapsed: float) -> str:
+    stage = "Filling in Dataset Details" if run["stage"] == "details" else "Syncing Data Fields"
+    m, s = divmod(int(max(0, elapsed)), 60)
+    return (f"{stage} · {run['scopes_done']}/{run['scopes_total']} markets · {run['fraction'] * 100:.0f}% · "
+            f"{m}m {s:02d}s elapsed")
+
+
+async def catalogue_matrix() -> None:
+    """Every market BRAIN offers as a Region × Universe matrix, each cell split into Delay 0 | Delay 1, filling live
+    as the sync works through it. Click a half to open that market in the Data Explorer."""
+    from ...catalog import queries as cq
+    from ...catalog import sync as catalog_sync
+    from .data_explorer import open_market
+
+    with card("w-full gap-3"):
+        with ui.row().classes("items-center w-full gap-3"):
+            ui.label("BRAIN Datasets").classes("ag-section-title")
+            headline = ui.label().classes("ag-muted text-sm")
+            ui.space()
+            action = ui.button().props("no-caps")
+        ui.label("Downloads every market's data fields and datasets (every region, delay and universe BRAIN offers "
+                 "you), USA D1 TOP3000 first so research can start while the rest arrive. Click a cell to open that "
+                 "market in the Data Explorer.").classes("ag-muted text-xs")
+        notice = ui.column().classes("w-full")
+        matrix = ui.column().classes("w-full")
+        bar = ui.linear_progress(value=0, show_value=False).classes("w-full")
+        with ui.row().classes("gap-3 flex-wrap text-xs ag-muted items-center"):
+            for st, text in catalog_sync.STATE_LABELS.items():
+                with ui.row().classes("items-center gap-1 no-wrap"):
+                    ui.element("span").style(f"display:inline-block;width:20px;height:11px;border-radius:2px;"
+                                             f"{_HALF[st]}")
+                    ui.label(text)
+            with ui.row().classes("items-center gap-1 no-wrap"):
+                ui.element("span").style(f"display:inline-block;width:20px;height:11px;border-radius:2px;{_NO_DELAY}")
+                ui.label("Not Offered")
+    agnostic_box = ui.column().classes("w-full")
+    state: dict = {"sig": None, "agnostic_sig": None}
+
+    async def start(region_agnostic: bool) -> None:
+        if not brain.client.logged_in:
+            ui.notify("Sign in to BRAIN first.", type="warning")
+            return
+        try:
+            await catalog_sync.start(region_agnostic=region_agnostic)
+            ui.notify("Catalogue sync queued: the markets download in the background.", type="positive")
+        except RuntimeError as exc:
+            ui.notify(str(exc), type="warning")
+
+    def cancel() -> None:
+        with ui.dialog() as dlg, ui.card().classes("ag-card p-5"):
+            ui.label("Cancel this sync?").classes("text-lg")
+            ui.label("Stops the sync. Markets that already arrived stay in the catalogue; press Sync again to finish "
+                     "the rest.").classes("text-sm")
+            with ui.row().classes("self-end"):
+                ui.button("Keep syncing", on_click=dlg.close).props("flat")
+
+                async def go() -> None:
+                    dlg.close()
+                    ok = await catalog_sync.cancel()
+                    ui.notify("Sync cancelled." if ok else "The sync had already finished.")
+                ui.button("Cancel sync", on_click=go).props("color=negative")
+        dlg.open()
+
+    def half(region: str, delay: int, universe: str, tile: dict | None, offered: bool) -> None:
+        if not offered:
+            ui.element("div").style(f"height:20px;border-radius:3px;flex:1;{_NO_DELAY}").tooltip(
+                f"{region} · {universe} has no Delay {delay}")
+            return
+        tile = tile or {"state": "waiting", "fields": None}
+        label = (f"{region} · Delay {delay} · {universe}: {catalog_sync.STATE_LABELS[tile['state']]}"
+                 + (f" · {tile['fields']:,} fields" if tile.get("fields") else "")
+                 + " · click to open in the Data Explorer")
+        el = ui.element("div").style(f"height:20px;border-radius:3px;flex:1;cursor:pointer;{_HALF[tile['state']]}")
+        if tile["state"] in _PULSE:
+            el.classes("animate-pulse")
+        el.tooltip(label)
+        el.on("click", lambda _e, r=region, d=delay, u=universe: open_market(r, d, u))
+
+    async def refresh() -> None:
+        synced = await cq.synced_tuples()
+        run = await catalog_sync.latest_run("all")
+        markets = [m for m in catalog_sync.offered_markets() if m.region != catalog_sync.REGION_AGNOSTIC]
+        running = bool(run and run["status"] == "RUNNING")
+        if running and run:
+            headline.set_text(_running_text(run, (catalog_sync.now() - run["started_at"]).total_seconds()))
+        states = _market_states(synced, run)
+        sig = (running, run and run.get("status"), run and run.get("error"),
+               tuple(sorted((k, v["state"], v.get("fields")) for k, v in states.items())), len(markets))
+        await render_agnostic(synced)
+        if sig == state["sig"]:
+            return
+        state["sig"] = sig
+        exists = {(m.region, m.delay, m.universe) for m in markets}
+        held = [r for r in synced if (r["region"], r["delay"], r["universe"]) in exists]
+        if running:
+            action.set_text("Cancel Sync")
+            action.props(remove="color=primary").props("color=negative icon=close")
+        else:
+            headline.set_text(f"{len(held):,} of {len(markets):,} markets synced · "
+                              f"{sum(r['fields'] for r in held):,} fields")
+            action.set_text("Sync")
+            action.props(remove="color=negative").props("color=primary icon=cloud_download")
+        bar.set_visibility(running)
+        if run:
+            bar.set_value(run.get("fraction") or 0)
+        notice.clear()
+        if run and not running and run.get("error"):
+            with notice, ui.row().classes("items-start gap-2 no-wrap"):
+                title = ("The sync failed" if run["status"] == "FAILED" else "The sync was cancelled"
+                         if run["status"] == "CANCELLED" else "Some markets did not sync, even after 3 tries")
+                ui.icon("warning").classes("ag-amber")
+                ui.label(f"{title}: {run['error']}").classes("text-sm ag-amber")
+        regions: dict[str, list[str]] = {}
+        delays = sorted({m.delay for m in markets})
+        for m in markets:
+            regions.setdefault(m.region, [])
+            if m.universe not in regions[m.region]:
+                regions[m.region].append(m.universe)
+        order = sorted(regions, key=lambda r: (-len(regions[r]), r))     # widest first: the grid fills from the left
+        matrix.clear()
+        with matrix:
+            if not markets:
+                empty_state("public_off", "BRAIN offered no markets", "Sign in, then press Refresh from BRAIN.")
+            with ui.row().classes("w-full gap-2 no-wrap overflow-x-auto items-start"):
+                for region in order:
+                    with ui.column().classes("gap-1 min-w-[118px] grow"):
+                        with ui.row().classes("w-full items-baseline justify-between px-1 no-wrap"):
+                            ui.label(region).classes("ag-mono text-sm")
+                            ui.label(" · ".join(f"D{d}" for d in delays)).classes("ag-muted text-xs")
+                        for universe in regions[region]:
+                            with ui.column().classes("gap-1 w-full p-1 rounded").style(
+                                    "border:1px solid var(--ag-border);background:rgba(255,255,255,.02)"):
+                                ui.label(universe).classes("ag-mono ag-muted text-[11px] truncate px-0.5")
+                                with ui.row().classes("gap-1 w-full no-wrap"):
+                                    for d in delays:
+                                        half(region, d, universe, states.get((region, d, universe)),
+                                             (region, d, universe) in exists)
+
+    async def render_agnostic(synced: list[dict]) -> None:
+        universes = [m.universe for m in catalog_sync.offered_markets() if m.region == catalog_sync.REGION_AGNOSTIC]
+        run = await catalog_sync.latest_run("agnostic") if universes else None
+        states = _market_states([r for r in synced if r["region"] == catalog_sync.REGION_AGNOSTIC], run)
+        running = bool(run and run["status"] == "RUNNING")
+        sig = (tuple(universes), running, tuple(sorted((k, v["state"], v.get("fields")) for k, v in states.items())))
+        if sig == state["agnostic_sig"]:
+            return
+        state["agnostic_sig"] = sig
+        agnostic_box.clear()
+        if not universes:
+            return          # BRAIN lists region ALL only for an account that may simulate region-agnostically
+        with agnostic_box, card("w-full gap-2"):
+            with ui.row().classes("items-center w-full gap-3"):
+                ui.label("Sync Region Agnostic Data").classes("ag-section-title")
+                held = sum(1 for u in universes if (catalog_sync.REGION_AGNOSTIC, 1, u) in states)
+                ui.label(f"{held} of {len(universes)} universes synced").classes("ag-muted text-sm")
+                ui.space()
+                if running:
+                    ui.button("Cancel Sync", icon="close", on_click=cancel).props("color=negative no-caps")
+                else:
+                    ui.button("Sync Region Agnostic Data", icon="cloud_download",
+                              on_click=lambda: start(True)).props("outline no-caps")
+            ui.label("One expression run in USA, Europe, Asia and Global at once. BRAIN hands this market over fifty "
+                     "fields at a time, dataset by dataset (about ten minutes per universe), so it is its own "
+                     "download.").classes("ag-muted text-xs")
+            with ui.row().classes("gap-2 w-full"):
+                for u in universes:
+                    tile = states.get((catalog_sync.REGION_AGNOSTIC, 1, u)) or {"state": "waiting", "fields": None}
+                    with ui.column().classes("gap-1 p-2 rounded min-w-[160px] cursor-pointer").style(
+                            "border:1px solid var(--ag-border)").on(
+                            "click", lambda _e, uu=u: open_market(catalog_sync.REGION_AGNOSTIC, 1, uu)):
+                        ui.label(u).classes("ag-mono text-sm")
+                        ui.element("div").style(f"height:10px;border-radius:2px;{_HALF[tile['state']]}")
+                        ui.label(f"{catalog_sync.STATE_LABELS[tile['state']]} · "
+                                 f"{fmt_int(tile.get('fields'))} fields").classes("ag-muted text-xs")
+
+    async def on_action() -> None:
+        if catalog_sync.running():
+            cancel()
+        else:
+            await start(False)
+
+    action.on_click(on_action)
+    await refresh()
+    ui.timer(1.0, refresh)

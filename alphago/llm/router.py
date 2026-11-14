@@ -5,6 +5,9 @@ Failover: when the primary fails after its own retries (rate-limited, overloaded
 network), the call moves to the next provider in `settings.llm.fallbacks` that is set up, instead of falling back to
 templates. A provider that failed is tried last for the next FAILOVER_COOLDOWN seconds, then first again. With no
 fallbacks configured (the default) behaviour is exactly as before. The daily budget stays shared.
+
+Within one provider, calls rotate over the keys of its pool by remaining budget (`alphago.ai.rotation`); when every
+key of the provider is out of budget for the model, that is a 429 here, so the call fails over like any other.
 """
 
 from __future__ import annotations
@@ -20,16 +23,18 @@ from .base import MODEL_OVERRIDE, LLMError, calls_today
 from .claude import claude
 from .gemini import gemini
 from .ollama import ollama
-from .openai_compat import openai_provider
+from .openai_compat import compat_providers, openai_provider
 from .openrouter import openrouter
 
 T = TypeVar("T", bound=BaseModel)
 
 PROVIDERS: dict[str, Any] = {"gemini": gemini, "claude": claude, "openai": openai_provider,
-                             "openrouter": openrouter, "ollama": ollama}
+                             "openrouter": openrouter, "ollama": ollama, **compat_providers()}
 PROVIDER_LABELS = {"gemini": "Gemini (Google AI Studio)", "claude": "Claude (Anthropic)",
                    "openai": "OpenAI / compatible", "openrouter": "OpenRouter (free models)",
-                   "ollama": "Ollama (local)"}
+                   "ollama": "Ollama (local)",
+                   **{name: p.label for name, p in PROVIDERS.items() if name not in (
+                       "gemini", "claude", "openai", "openrouter", "ollama")}}
 FAILOVER_COOLDOWN = 600.0
 FAILOVER_CODES = (None, 404, 408, 429, 500, 502, 503, 504, 529)
 
@@ -37,6 +42,8 @@ FAILOVER_CODES = (None, 404, 408, 429, 500, 502, 503, 504, 529)
 def failover_worthy(exc: LLMError) -> bool:
     """Provider trouble (worth another provider), not a problem another provider would share."""
     msg = (exc.message or "").lower()
+    if getattr(exc, "states", None) is not None:        # every pooled key of this provider is spent: another may not be
+        return True
     if "budget" in msg or "malformed json" in msg:
         return False
     return bool(exc.transient) or exc.code in FAILOVER_CODES or "timed out" in msg or "timeout" in msg
@@ -120,6 +127,30 @@ class LLMRouter:
     async def generate_text(self, prompt: str, **kwargs: Any) -> str:
         return await self._call("generate_text", prompt, **kwargs)
 
+    async def generate_raw(self, prompt: str, schema: type[BaseModel], **kwargs: Any) -> str:
+        """Structured output as unvalidated text (the assistant degrades to plain text instead of failing)."""
+        return await self._call("generate_raw", prompt, schema, **kwargs)
+
+    async def generate_raw_with(self, provider_name: str, model: str, prompt: str, schema: type[BaseModel],
+                                **kwargs: Any) -> tuple[str, str, str]:
+        """`generate_raw` on a chosen provider and model; when that provider is in trouble, the normal chain answers.
+        Returns (text, provider, model) so the caller can say who answered."""
+        provider = PROVIDERS.get(provider_name)
+        if provider is not None and provider.configure():
+            token = MODEL_OVERRIDE.set(model or None)
+            try:
+                return await provider.generate_raw(prompt, schema, **kwargs), provider.name, model or provider.pick(
+                    kwargs.get("role", "ideation"))
+            except LLMError as exc:
+                if not failover_worthy(exc) or not any(p.configure() for p in self.chain() if p is not provider):
+                    raise
+                self.last_failover = {"from": provider.name, "to": self.active.name, "error": exc.message[:300],
+                                      "at": time.time()}
+            finally:
+                MODEL_OVERRIDE.reset(token)
+        text = await self.generate_raw(prompt, schema, **kwargs)
+        return text, self.active.name, self.active.pick(kwargs.get("role", "ideation"))
+
     async def generate_json_with(self, provider_name: str, model: str, prompt: str, schema: type[T],
                                  **kwargs: Any) -> T:
         """One call on a given provider and model (the model tournament). If that provider is in trouble, the
@@ -141,8 +172,15 @@ class LLMRouter:
         return await calls_today()
 
     async def restore_models(self) -> None:
+        """Startup: each provider's cached model list, plus the key pool and the model registry (the pool adopts a
+        single key saved on the LLM page, so it rotates with the others)."""
         for provider in PROVIDERS.values():
             await provider.restore_models()
+        from ..ai.keys import keystore
+        from ..ai.registry import registry
+        await registry.load()
+        await keystore.load()
+        await keystore.adopt_saved_keys(settings.llm.daily_call_budget)
 
     async def test(self) -> str:
         return await self.active.test()

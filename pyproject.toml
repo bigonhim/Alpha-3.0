@@ -25,6 +25,7 @@ dependencies = [
     "pandas>=2.2",
     "tzdata>=2024.1",
     "yfinance>=0.2.54",               # SPC Lab PnL test (Yahoo Finance daily prices)
+    "optuna>=4.0",                    # Research Labs: TPE search (Search and Template labs)
 ]
 
 [project.optional-dependencies]

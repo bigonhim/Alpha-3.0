@@ -13,7 +13,7 @@ import httpx
 from pydantic import BaseModel
 
 from ..events import bus
-from .base import ChatProvider, LLMError, Reply, inline_schema
+from .base import TEMPERATURE, ChatProvider, LLMError, Reply, inline_schema
 
 log = logging.getLogger(__name__)
 
@@ -117,6 +117,8 @@ class OllamaProvider(ChatProvider):
         limit = int(self.cfg.num_predict or 8_192)
         body: dict[str, Any] = {"model": model, "messages": messages, "stream": False, "keep_alive": "30m",
                                 "options": {"num_ctx": num_ctx, "num_predict": limit}}
+        if TEMPERATURE.get() is not None:
+            body["options"]["temperature"] = TEMPERATURE.get()
         if schema is not None:
             body["format"] = inline_schema(schema)
         if info.get("thinking") and model not in self._no_think:

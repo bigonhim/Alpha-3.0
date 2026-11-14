@@ -254,6 +254,9 @@ async def sync_scope(ctx: JobContext | None, params: dict) -> str:
 
 # ---------------------------------------------------------------- account
 
+HIDDEN_TOO = "hidden=true%1Ffalse"       # BRAIN's multi-value separator: hidden and visible alphas
+
+
 async def _ingest_alpha_page(items: list[dict[str, Any]]) -> int:
     async with db.write() as s:
         for data in items:
@@ -268,13 +271,14 @@ async def _ingest_alpha_page(items: list[dict[str, Any]]) -> int:
 
 
 async def sync_alphas(ctx: JobContext | None, params: dict) -> str:
-    """ACTIVE alphas in full + recent UNSUBMITTED ones (incremental unless params['full'])."""
+    """Submitted alphas (ACTIVE and DECOMMISSIONED) in full + recent UNSUBMITTED ones (incremental unless
+    params['full']). Hidden alphas are included: BRAIN's listing leaves them out unless asked."""
     full = bool(params.get("full"))
     max_unsubmitted = int(params.get("max_unsubmitted", 3000))
     total = 0
     page: list[dict[str, Any]] = []
     # dateCreated order lets the listing continue past BRAIN's first-1,000 cap (see AlphasAPI.iterate)
-    async for item in brain.alphas.iterate({"status": "ACTIVE"}, order="-dateCreated"):
+    async for item in brain.alphas.iterate(f"status%21=UNSUBMITTED&{HIDDEN_TOO}", order="-dateCreated"):
         page.append(item)
         if len(page) >= 100:
             total += await _ingest_alpha_page(page)
@@ -291,7 +295,8 @@ async def sync_alphas(ctx: JobContext | None, params: dict) -> str:
     since = None if full else await last_synced("alphas")
     page = []
     count_unsub = 0
-    async for item in brain.alphas.iterate({"status": "UNSUBMITTED"}, max_items=None if full else max_unsubmitted):
+    async for item in brain.alphas.iterate(f"status=UNSUBMITTED&{HIDDEN_TOO}",
+                                           max_items=None if full else max_unsubmitted):
         created = item.get("dateCreated")
         if since and created and datetime.fromisoformat(created.replace("Z", "+00:00")) < since - timedelta(days=1):
             break

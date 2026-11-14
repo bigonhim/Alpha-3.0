@@ -28,7 +28,7 @@ from sqlalchemy import case, func, select
 
 from ..db import db
 from ..db.models import LLMCall
-from .base import LLMError, Reply
+from .base import CURRENT_KEY, LLMError, Reply
 from .openai_compat import OpenAIProvider
 
 log = logging.getLogger(__name__)
@@ -112,6 +112,8 @@ def base_score(m: dict[str, Any], now: datetime | None = None) -> float:
 class OpenRouterProvider(OpenAIProvider):
     name = "openrouter"
     needs_key = True
+    cache_key = False                 # alpha-harness sends no prompt_cache_key or array lengths to OpenRouter
+    array_lengths = False
     extra_headers = {"HTTP-Referer": "https://github.com/alphago-brain", "X-Title": "AlphaGo BRAIN workstation"}
 
     def __init__(self) -> None:
@@ -119,7 +121,32 @@ class OpenRouterProvider(OpenAIProvider):
         self._cool_until: dict[str, float] = {}
         self._health: dict[str, float] = {}          # model -> error share over the last 2 days
         self._health_at = 0.0
-        self.free_cap_until = 0.0                    # account-wide free daily cap reached until this time
+        # the free daily cap is per account, so per key: pooled key id (or None for the single saved key) -> until
+        self._free_cap: dict[int | None, float] = {}
+
+    @property
+    def free_cap_until(self) -> float:
+        """When the free daily cap of the key in use (an account) comes back; 0 when it is not reached."""
+        choice = CURRENT_KEY.get()
+        return self._free_cap.get(choice.key_id if choice else None, 0.0)
+
+    @free_cap_until.setter
+    def free_cap_until(self, value: float) -> None:
+        choice = CURRENT_KEY.get()
+        self._free_cap[choice.key_id if choice else None] = value
+
+    async def list_model_ids(self, secret: str) -> list[str]:
+        """The free key check. OpenRouter's model list is public, so it says nothing about a key: its /key endpoint
+        does (and costs no request from the daily allowance)."""
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as http:
+                r = await http.get(f"{self.base_url}/key", headers={"Authorization": f"Bearer {secret}"})
+        except httpx.HTTPError as exc:
+            raise LLMError(f"OpenRouter could not be reached: {exc}", transient=True) from exc
+        if r.status_code >= 400:
+            raise LLMError(f"OpenRouter error {r.status_code}: {r.text[:300]}", r.status_code, detail=r.text[:2000])
+        data = (r.json() or {}).get("data") or {}
+        return [f"key {data.get('label') or 'ok'}" + (" · free tier" if data.get("is_free_tier") else "")]
 
     @property
     def base_url(self) -> str:

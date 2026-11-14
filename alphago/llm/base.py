@@ -31,6 +31,33 @@ ROLES = ("ideation", "refine", "describe")
 # per-call context: the model tournament forces a model; ideation records which prompt version it rendered
 MODEL_OVERRIDE: ContextVar[str | None] = ContextVar("llm_model_override", default=None)
 PROMPT_VERSION: ContextVar[int | None] = ContextVar("llm_prompt_version", default=None)
+# per-call sampling temperature (None = the provider's default; the assistant asks for 0.6)
+TEMPERATURE: ContextVar[float | None] = ContextVar("llm_temperature", default=None)
+
+
+@dataclass(frozen=True)
+class KeyChoice:
+    """The pooled key one request is sent with (set by `alphago.ai.rotation`, read by each provider's client)."""
+    key_id: int
+    secret: str
+
+
+CURRENT_KEY: ContextVar[KeyChoice | None] = ContextVar("llm_current_key", default=None)
+
+
+def pool_secret(provider: str) -> str | None:
+    """The key a provider's client should use right now: the rotation's choice inside a call, else the first working
+    pooled key (for model listing), else None (the single saved key applies)."""
+    choice = CURRENT_KEY.get()
+    if choice is not None:
+        return choice.secret
+    from ..ai.keys import keystore
+    return keystore.first_secret(provider)
+
+
+def has_pool(provider: str) -> bool:
+    from ..ai.keys import keystore
+    return keystore.has_keys(provider)
 
 ERROR_KINDS = ("rate_limited", "timeout", "model_unavailable", "server_error", "auth", "budget", "bad_json", "other")
 
@@ -44,6 +71,8 @@ def classify_error(error: str | None) -> str | None:
     m = re.search(r"\b([1-5]\d\d)\b", e)
     if m:
         code = int(m.group(1))
+    if "daily allowance" in e or "per-minute limit" in e:
+        return "rate_limited"
     if "budget" in e:
         return "budget"
     if code == 429 or "rate limit" in e or "rate_limit" in e or "resource_exhausted" in e or "quota" in e \
@@ -70,12 +99,13 @@ def chosen_model(provider: Any, role: str) -> str:
 
 class LLMError(Exception):
     def __init__(self, message: str, code: int | None = None, *, transient: bool = False,
-                 retry_after: float | None = None) -> None:
+                 retry_after: float | None = None, detail: str = "") -> None:
         super().__init__(message)
         self.message = message
         self.code = code
         self.transient = transient          # worth retrying (throttled, overloaded, network blip)
         self.retry_after = retry_after
+        self.detail = detail                # the provider's own error body (which limit a 429 hit is said only there)
 
 
 class Pacer:
@@ -155,6 +185,26 @@ def parse_json(text: str, schema: type[T]) -> T:
         if 0 <= start < end and (start > 0 or end < len(cleaned) - 1):
             return schema.model_validate_json(cleaned[start:end + 1])
         raise
+
+
+_FENCED = re.compile(r"```(?:ya?ml|json)?\s*\n(.*?)```", re.DOTALL)
+
+
+def loads_or(text: str) -> dict[str, Any]:
+    """A model's JSON reply as a dict, or {} when it is not usable (callers that degrade instead of raising)."""
+    cleaned = _THINK.sub("", text or "").strip()
+    start, end = cleaned.find("{"), cleaned.rfind("}")
+    candidates = [cleaned, *(m.group(1) for m in _FENCED.finditer(cleaned))]
+    if 0 <= start < end:
+        candidates.append(cleaned[start:end + 1])
+    for candidate in candidates:
+        try:
+            payload = json.loads(candidate)
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if isinstance(payload, dict):
+            return payload
+    return {}
 
 
 def inline_schema(schema: type[BaseModel]) -> dict[str, Any]:
@@ -279,6 +329,12 @@ class ChatProvider:
         if not model:
             raise LLMError(f"No {self.label} model chosen — pick one on the 'LLM Integration' page.")
         level = (thinking or settings.llm.thinking_level or "").lower()
+        from ..ai import rotation
+
+        async def logged(exc: LLMError, started: float) -> None:
+            await log_call(self.name, model, purpose, started, status="error",
+                           error=f"{exc.code}: {exc.message}"[:1000])
+
         attempt = 0
         while True:
             attempt += 1
@@ -287,10 +343,10 @@ class ChatProvider:
             started = time.monotonic()
             try:
                 async with self._slot():
-                    reply = await self._complete(model, prompt, system, schema, level)
+                    reply = await rotation.complete(
+                        self.name, model, lambda: self._complete(model, prompt, system, schema, level),
+                        tokens=rotation.reply_tokens, on_error=logged)
             except LLMError as exc:
-                await log_call(self.name, model, purpose, started, status="error",
-                               error=f"{exc.code}: {exc.message}"[:1000])
                 if exc.transient and attempt < max_attempts:
                     if exc.code == 429 and self.pacer:
                         self.pacer.throttled()
@@ -307,7 +363,17 @@ class ChatProvider:
             return reply
 
     async def generate_json(self, prompt: str, schema: type[T], *, system: str | None = None, role: str = "ideation",
-                            purpose: str = "ideation", thinking: str | None = None) -> T:
+                            purpose: str = "ideation", thinking: str | None = None,
+                            temperature: float | None = None) -> T:
+        token = TEMPERATURE.set(temperature)
+        try:
+            return await self._generate_json(prompt, schema, system=system, role=role, purpose=purpose,
+                                             thinking=thinking)
+        finally:
+            TEMPERATURE.reset(token)
+
+    async def _generate_json(self, prompt: str, schema: type[T], *, system: str | None, role: str, purpose: str,
+                             thinking: str | None) -> T:
         reply = await self._run(prompt=prompt, system=system, role=role, purpose=purpose, schema=schema,
                                 thinking=thinking)
         if isinstance(reply.parsed, schema):
@@ -328,9 +394,29 @@ class ChatProvider:
             raise LLMError(f"{self.label} returned malformed JSON for {schema.__name__}: {exc.errors()[:2]}") from exc
 
     async def generate_text(self, prompt: str, *, system: str | None = None, role: str = "describe",
-                            purpose: str = "text", thinking: str | None = None) -> str:
-        reply = await self._run(prompt=prompt, system=system, role=role, purpose=purpose, schema=None,
-                                thinking=thinking)
+                            purpose: str = "text", thinking: str | None = None,
+                            temperature: float | None = None) -> str:
+        token = TEMPERATURE.set(temperature)
+        try:
+            reply = await self._run(prompt=prompt, system=system, role=role, purpose=purpose, schema=None,
+                                    thinking=thinking)
+        finally:
+            TEMPERATURE.reset(token)
+        return _THINK.sub("", reply.text or "").strip()
+
+    async def generate_raw(self, prompt: str, schema: type[BaseModel], *, system: str | None = None,
+                           role: str = "ideation", purpose: str = "assistant", thinking: str | None = None,
+                           temperature: float | None = None) -> str:
+        """One structured-output request whose reply text is returned unvalidated, for a caller that degrades to
+        plain text rather than failing (the assistant: a reply the consultant can read beats a parse error)."""
+        token = TEMPERATURE.set(temperature)
+        try:
+            reply = await self._run(prompt=prompt, system=system, role=role, purpose=purpose, schema=schema,
+                                    thinking=thinking)
+        finally:
+            TEMPERATURE.reset(token)
+        if reply.parsed is not None and isinstance(reply.parsed, BaseModel) and not (reply.text or "").strip():
+            return reply.parsed.model_dump_json()
         return _THINK.sub("", reply.text or "").strip()
 
     async def test(self) -> str:

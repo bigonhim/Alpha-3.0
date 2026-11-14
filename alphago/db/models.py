@@ -109,6 +109,14 @@ class DataField(Base):
     alpha_count: Mapped[int | None] = mapped_column(Integer)
     themes: Mapped[Any] = mapped_column(JSON, nullable=True)
     synced_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
+    # Data Explorer (alpha-harness catalogue): taxonomy, coverage over time, pyramid theme, first seen
+    category_id: Mapped[str | None] = mapped_column(String(64))
+    subcategory_id: Mapped[str | None] = mapped_column(String(64))
+    subcategory: Mapped[str | None] = mapped_column(String(128))
+    date_coverage: Mapped[float | None] = mapped_column(Float)
+    pyramid_multiplier: Mapped[float | None] = mapped_column(Float)
+    date_created: Mapped[str | None] = mapped_column(String(10))
+    region_coverage: Mapped[Any] = mapped_column(JSON, nullable=True)
 
 
 class DatasetInsight(Base):
@@ -236,6 +244,8 @@ class Candidate(Base):
     cluster: Mapped[str | None] = mapped_column(String(32))             # economic idea (see engine/clusters.py)
     llm_model: Mapped[str | None] = mapped_column(String(96))           # provider:model that proposed it
     prompt_version: Mapped[int | None] = mapped_column(Integer)         # PromptVersion.id of the ideation prompt
+    sent_at: Mapped[datetime | None] = mapped_column(UTCDateTime)       # set just before the POST (orphan anchor)
+    orphan_requeues: Mapped[int | None] = mapped_column(Integer)        # times an unanswered send was requeued
 
 
 class Simulation(Base):
@@ -329,6 +339,29 @@ class Alpha(Base):
     check_tries: Mapped[int | None] = mapped_column(Integer)            # /check replies in a row without an answer
     repair_state: Mapped[str | None] = mapped_column(String(16))        # exhausted = no untried move can help
     repair_note: Mapped[str | None] = mapped_column(Text)               # why, in a sentence
+    # --- BRAIN-exact figures (alpha-harness vault): held-out halves, investability, after-cost
+    sim_type: Mapped[str | None] = mapped_column(String(16))            # REGULAR | SUPER | RA_PARENT | RA_CHILD
+    simulation_mode: Mapped[str | None] = mapped_column(String(8))      # FULL | QUICK
+    instrument_type: Mapped[str | None] = mapped_column(String(16))
+    language: Mapped[str | None] = mapped_column(String(16))
+    pasteurization: Mapped[str | None] = mapped_column(String(8))
+    nan_handling: Mapped[str | None] = mapped_column(String(8))
+    max_trade: Mapped[str | None] = mapped_column(String(8))
+    max_position: Mapped[str | None] = mapped_column(String(8))
+    test_period: Mapped[str | None] = mapped_column(String(16))
+    train_sharpe: Mapped[float | None] = mapped_column(Float)
+    train_fitness: Mapped[float | None] = mapped_column(Float)
+    test_sharpe: Mapped[float | None] = mapped_column(Float)
+    test_fitness: Mapped[float | None] = mapped_column(Float)
+    test_start: Mapped[str | None] = mapped_column(String(10))          # ISO date the test period starts
+    test_turnover: Mapped[float | None] = mapped_column(Float)
+    is_pnl: Mapped[float | None] = mapped_column(Float)                 # is.pnl: total IS PnL BRAIN reports ($)
+    end_date: Mapped[str | None] = mapped_column(String(10))            # settings.endDate / last IS day
+    after_cost_5bps: Mapped[float | None] = mapped_column(Float)        # Sharpe net of 5 bps trading cost
+    k_ratio: Mapped[float | None] = mapped_column(Float)
+    pp_corr: Mapped[float | None] = mapped_column(Float)                # local Power Pool correlation estimate
+    pp_verdict: Mapped[str | None] = mapped_column(String(12))          # clear | beats | blocked | unmeasured
+    brain_verdict: Mapped[str | None] = mapped_column(String(12))       # submittable | pending | refused (BRAIN rule)
 
 
 class OptimizationAttempt(Base):
@@ -521,6 +554,12 @@ class AlphaPnL(Base):
     max_dd: Mapped[float | None] = mapped_column(Float)      # $ (positive number)
     calmar: Mapped[float | None] = mapped_column(Float)
     spark: Mapped[Any] = mapped_column(JSON, nullable=True)  # ~60 points of cumulative PnL for sparklines
+    # BRAIN-exact daily series (engine/metrics.py): first day kept, turnover stamped as BRAIN charges it
+    s_dates: Mapped[Any] = mapped_column(JSON, nullable=True)
+    s_pnl: Mapped[Any] = mapped_column(JSON, nullable=True)
+    s_turnover: Mapped[Any] = mapped_column(JSON, nullable=True)
+    has_turnover: Mapped[bool | None] = mapped_column(Boolean)
+    series_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
 
 
 class DatasetRating(Base):

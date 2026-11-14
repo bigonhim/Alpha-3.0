@@ -14,7 +14,15 @@ from typing import Any, Callable
 from sqlalchemy import func, select, update
 
 from ..brain import brain
-from ..brain.errors import BrainError, ConcurrencyLimit, PersonaRequired, QuotaExhausted, SimulationRejected
+from ..brain.errors import (
+    BatchRefused,
+    BrainError,
+    ConcurrencyLimit,
+    MaybeDelivered,
+    PersonaRequired,
+    QuotaExhausted,
+    SimulationRejected,
+)
 from ..brain.simulations import group_key, normalize_settings, regular_payload, settings_hash
 from ..config import settings as app_settings
 from ..db import db
@@ -84,6 +92,8 @@ class SimulationService:
         self.paused_tasks: set[int] = set()
         self._inflight_task: dict[int | None, int] = {}
         self._rr: list[int | None] = []             # round-robin order of task keys (None = work without a task)
+        self.single_only = False                     # BRAIN refused a multi-simulation (403): send one at a time
+        self.running: dict[str, dict[str, Any]] = {}  # sim id -> {ids, region, progress, started, task} (live matrix)
 
     # ------------------------------------------------------------ status
 
@@ -108,8 +118,12 @@ class SimulationService:
             for sim in sims:
                 if not sim.location:
                     sim.status = "LOST"
-            await s.execute(update(Candidate).where(Candidate.status == "simulating",
-                                                    Candidate.sim_id.is_(None)).values(status="queued"))
+            # sent (or being sent) when the app closed, but BRAIN's answer never arrived: it may have run, so it is
+            # matched against the alpha listing (engine/reconcile.py) instead of being paid for twice
+            await s.execute(update(Candidate).where(Candidate.status == "simulating", Candidate.sim_id.is_(None),
+                                                    Candidate.sent_at.is_not(None)).values(status="orphaned"))
+            await s.execute(update(Candidate).where(Candidate.status == "simulating", Candidate.sim_id.is_(None),
+                                                    Candidate.sent_at.is_(None)).values(status="queued"))
             rows = (await s.execute(select(Candidate.id, Candidate.task_id).where(Candidate.status == "queued")
                                     .order_by(Candidate.id))).all()
         queued = [cid for cid, _ in rows]
@@ -486,7 +500,8 @@ class SimulationService:
             if not valid:
                 continue
             gk = group_key(valid[0].settings)
-            pack = [c for c in valid if group_key(c.settings) == gk][:max(1, min(10, size))]
+            limit = 1 if self.single_only else max(1, min(10, size))
+            pack = [c for c in valid if group_key(c.settings) == gk][:limit]
             ids = {c.id for c in pack}
             self._queue = deque(i for i in self._queue if i not in ids)
             for i in ids:
@@ -495,6 +510,14 @@ class SimulationService:
             self._rr.append(key)
             return pack
         return []
+
+    def requeue(self, cands: list[Candidate]) -> None:
+        """Put candidates (already set to `queued` in the database) back at the end of the queue."""
+        for c in cands:
+            if c.task_id is not None:
+                self._task_of[c.id] = c.task_id
+        self._queue.extend(c.id for c in cands)
+        self._wake.set()
 
     def _requeue_front(self, pack: list[Candidate]) -> None:
         self._queue.extendleft(reversed([c.id for c in pack]))
@@ -523,21 +546,32 @@ class SimulationService:
                   "optimizer" if first.origin in ("optimize", "robustness") else "you")
         ids = [c.id for c in pack]
         self._inflight_candidates += len(pack)
-        await self._set_status(ids, status="simulating")
+        # on record before the POST: if the answer is lost, `sent_at` anchors the search for what BRAIN made
+        await self._set_status(ids, status="simulating", sent_at=utcnow())
         payloads = [regular_payload(c.expression, c.settings) for c in pack]
         sim_holder: dict[str, str] = {}
 
-        def on_started(location: str) -> None:
+        async def on_started(location: str) -> None:
             sim_holder["location"] = location
             sim_id = location.rstrip("/").rsplit("/", 1)[-1]
             sim_holder["id"] = sim_id
-            asyncio.get_running_loop().create_task(self._record_sim(sim_id, location, ids, pack[0].region,
-                                                                    "multi" if len(pack) > 1 else "single"))
+            self.running[sim_id] = {"ids": ids, "region": first.region, "progress": None, "task": first.task_id,
+                                    "started": utcnow(), "size": len(pack),
+                                    "expressions": [c.expression for c in pack]}
+            await self._record_sim(sim_id, location, ids, first.region, "multi" if len(pack) > 1 else "single")
+
+        def on_progress(value: float | None) -> None:
+            sid = sim_holder.get("id")
+            if sid and sid in self.running:
+                self.running[sid]["progress"] = value
 
         try:
-            outcomes = await brain.sims.run(payloads, on_started=on_started)
+            try:
+                outcomes = await brain.sims.run(payloads, on_started=on_started, on_progress=on_progress)
+            finally:
+                self.running.pop(sim_holder.get("id", ""), None)
         except (ConcurrencyLimit, PersonaRequired) as exc:
-            await self._set_status(ids, status="queued")
+            await self._set_status(ids, status="queued", sent_at=None)
             self._requeue_front(pack)
             if isinstance(exc, PersonaRequired):
                 self.pause("BRAIN biometric verification required")
@@ -546,17 +580,48 @@ class SimulationService:
             self._inflight_candidates -= len(pack)
             return
         except QuotaExhausted as exc:
-            await self._set_status(ids, status="queued")
+            await self._set_status(ids, status="queued", sent_at=None)
             self._requeue_front(pack)
             self.pause(f"quota: {exc.message}")
-            bus.publish("simulate", f"Queue paused — BRAIN reports the daily simulation limit: {exc.message}", "warning")
+            bus.publish("simulate", f"Queue paused until the daily reset: BRAIN reports the daily simulation limit "
+                                    f"({exc.message}).", "warning")
             self._inflight_candidates -= len(pack)
             return
-        except (SimulationRejected, BrainError) as exc:
-            await self._set_status(ids, status="error", error=exc.message[:2000], finished_at=utcnow())
-            bus.publish("simulate", f"{len(pack)} simulation(s) failed: {exc.message}", "error")
-            for cid in ids:
-                self._resolve(cid)
+        except BatchRefused as exc:
+            self.single_only = True
+            await self._set_status(ids, status="queued", sent_at=None)
+            self._requeue_front(pack)
+            bus.publish("simulate", f"BRAIN refused a multi-simulation ({exc.message}); sending alphas one at a time.",
+                        "warning")
+            self._inflight_candidates -= len(pack)
+            return
+        except MaybeDelivered as exc:
+            # not resent: BRAIN may have taken it. The reconcile loop finds the alphas it made, or requeues them
+            await self._set_status(ids, status="orphaned", error=exc.message[:2000])
+            bus.publish("simulate", f"{len(pack)} simulation(s) got no answer from BRAIN; checking BRAIN's alpha "
+                                    "list for them before anything is sent again.", "warning")
+            self._inflight_candidates -= len(pack)
+            return
+        except SimulationRejected as exc:
+            if exc.per_child and len(exc.per_child) == len(pack):
+                bad = [c for c, msg in zip(pack, exc.per_child) if msg]
+                good = [c for c, msg in zip(pack, exc.per_child) if not msg]
+                for c, msg in zip(pack, exc.per_child):
+                    if msg:
+                        await self._set_status([c.id], status="error", error=f"BRAIN rejected: {msg}"[:2000],
+                                               finished_at=utcnow())
+                        self._resolve(c.id)
+                if good:          # innocent siblings of a rejected alpha go back to the front of the queue
+                    await self._set_status([c.id for c in good], status="queued", sent_at=None)
+                    self._requeue_front(good)
+                bus.publish("simulate", f"BRAIN rejected {len(bad)} of {len(pack)} alpha(s): "
+                                        f"{next(m for m in exc.per_child if m)}", "error")
+            else:
+                await self._fail(pack, exc.message)
+            self._inflight_candidates -= len(pack)
+            return
+        except BrainError as exc:
+            await self._fail(pack, exc.message)
             self._inflight_candidates -= len(pack)
             return
         try:
@@ -564,6 +629,35 @@ class SimulationService:
         finally:
             self._inflight_candidates -= len(pack)
             self._wake.set()
+
+    async def _fail(self, pack: list[Candidate], message: str) -> None:
+        ids = [c.id for c in pack]
+        await self._set_status(ids, status="error", error=message[:2000], finished_at=utcnow())
+        bus.publish("simulate", f"{len(pack)} simulation(s) failed: {message}", "error")
+        for cid in ids:
+            self._resolve(cid)
+
+    async def cancel_running(self, sim_id: str, *, force: bool = False) -> str:
+        """Cancel a running (multi-)simulation on BRAIN. A second press (force) ends it here even if BRAIN refuses."""
+        ok = await brain.sims.cancel(sim_id)
+        if not ok and not force:
+            return "refused"
+        info = self.running.pop(sim_id, None)
+        ids = list((info or {}).get("ids") or [])
+        if not ids:
+            async with db.session() as s:
+                sim = await s.get(Simulation, sim_id)
+                ids = list((sim.candidate_ids if sim else None) or [])
+        if ids:
+            await self._set_status(ids, status="cancelled", finished_at=utcnow(),
+                                   error="Cancelled by you" + ("" if ok else " (ended here; BRAIN refused to cancel)"))
+            for cid in ids:
+                self._resolve(cid)
+        async with db.write() as s:
+            sim = await s.get(Simulation, sim_id)
+            if sim is not None:
+                sim.status, sim.finished_at = "CANCELLED", utcnow()
+        return "cancelled" if ok else "forced"
 
     async def _record_sim(self, sim_id: str, location: str, ids: list[int], region: str | None, kind: str) -> None:
         async with db.write() as s:

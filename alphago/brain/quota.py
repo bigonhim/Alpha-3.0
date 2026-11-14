@@ -67,6 +67,11 @@ class QuotaTracker:
         if self.remaining is not None:
             self.remaining = max(0, self.remaining - n)
 
+    def mark_exhausted(self) -> None:
+        """BRAIN said DAILY_SIMULATION_LIMIT_EXCEEDED: nothing more can be sent until the reset."""
+        self._roll_day()
+        self.remaining = 0
+
     @property
     def effective_limit(self) -> int:
         return self.limit or ASSUMED_DAILY_LIMIT

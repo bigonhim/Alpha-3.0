@@ -29,9 +29,11 @@ async def _keepalive() -> None:
             if client.state == "logged_in":
                 left = await client.refresh_session()
                 if 0 < left < settings.brain.relogin_threshold_s and brain_credentials():
-                    await client.login()
+                    await client.login()          # the session is still valid: renewing it cannot lock anything
                 elif left == 0 and brain_credentials():
-                    await client.login()
+                    await client.silent_login()
+            elif client.state in ("logged_out", "error") and brain_credentials():
+                await client.silent_login()       # at most hourly, never after BRAIN refused the stored login
         except PersonaRequired:
             bus.publish("sync", "BRAIN asks for biometric verification — open 'Sync with BRAIN' to continue.", "warning")
         except (AuthError, BrainError) as exc:
@@ -44,6 +46,13 @@ async def _keepalive() -> None:
 async def try_auto_login() -> None:
     from .engine.audit import ACTOR
     ACTOR.set("system")
+    try:
+        if await brain.client.resume_session():
+            bus.publish("sync", "Resumed your WorldQuant BRAIN session.", "success")
+            await load_options_quietly()
+            return
+    except Exception:
+        log.exception("could not resume the BRAIN session")
     if not brain_credentials():
         return
     try:
@@ -142,6 +151,10 @@ async def startup() -> None:
     await simulator.start()
     from .engine.research import daily_scheduler, research
     await research.restore()                # tasks interrupted by a restart wait for the user
+    from . import extensions
+    extensions.load()                       # labs, tools and pool features (alpha-harness)
+    from .labs.runner import runner
+    await runner.restore()                  # lab tasks carry on from their trial rows
     await _close_stale_runs()
     from .engine.actions import recheck_loop, rederive_check_states
     await rederive_check_states()
@@ -150,6 +163,8 @@ async def startup() -> None:
     _tasks.append(asyncio.create_task(_keepalive(), name="keepalive"))
     _tasks.append(asyncio.create_task(daily_scheduler(), name="daily-scheduler"))
     _tasks.append(asyncio.create_task(recheck_loop(), name="recheck"))
+    from .engine.reconcile import reconcile_loop
+    _tasks.append(asyncio.create_task(reconcile_loop(), name="orphan-reconcile"))
     from .background import keep_awake_loop
     alerts.install()
     _tasks.append(asyncio.create_task(health.flush_loop(), name="health-flush"))

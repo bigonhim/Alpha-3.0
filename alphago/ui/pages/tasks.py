@@ -170,7 +170,8 @@ async def repair_dialog(alpha_ids: list[str] | None = None, scope: dict | None =
     d.open()
 
 
-async def page() -> None:
+async def page(task: int | None = None, kind: str | None = None) -> None:
+    """`/tasks?task=<id>` opens that research task's alphas (the command palette links here)."""
     with ui.row().classes("w-full items-start no-wrap"):
         page_header("Tasks", "Research tasks share BRAIN's concurrent simulation slots (cores). Pause, stop or delete "
                              "any task; the queue and background jobs are below.")
@@ -393,5 +394,7 @@ async def page() -> None:
 
     await refresh(force=True)
     await refresh_slow()
+    if task and kind != "lab":
+        await show_task(type("Ev", (), {"args": {"data": {"id": int(task)}}})())
     ui.timer(2.0, refresh)
     ui.timer(3.0, refresh_slow)

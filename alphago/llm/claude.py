@@ -5,17 +5,20 @@
 - The knowledge pack is sent as a cached system block, so repeated calls read it from the prompt cache.
 - Refusals: `stop_reason == "refusal"` is checked before reading output. Server-side `fallbacks: "default"` re-runs a
   declined request on Anthropic's recommended fallback model (not available for Haiku 5.5).
+- Keys: with keys in the pool every request runs on the key `alphago.ai.rotation` chose; a temperature a model
+  refuses is dropped for that model from then on.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import Any
 
 from pydantic import BaseModel, ValidationError
 
 from ..credentials import llm_key
-from .base import ChatProvider, LLMError, Reply
+from .base import TEMPERATURE, ChatProvider, LLMError, Reply, has_pool, pool_secret
 
 log = logging.getLogger(__name__)
 
@@ -36,11 +39,18 @@ class ClaudeProvider(ChatProvider):
         self._key: str | None = None
         self._no_effort: set[str] = set()       # models that rejected output_config.effort
         self._no_fallback: set[str] = set()     # models that rejected the fallbacks parameter
+        self._no_temperature: set[str] = set()  # models that take only their own default temperature
+        self._keyed: dict[str, Any] = {}        # one client per pooled key
 
     def configure(self, api_key: str | None = None) -> bool:
         key = api_key or llm_key("claude")
         if not key:
-            self._client, self.status = None, "unconfigured"
+            self._client = None
+            if api_key is None and has_pool(self.name):
+                if self.status == "unconfigured":
+                    self.status = "configured"
+                return True
+            self.status = "unconfigured"
             return False
         if key != self._key or self._client is None:
             try:
@@ -60,7 +70,30 @@ class ClaudeProvider(ChatProvider):
     def client(self) -> Any:
         if not self.configure():
             raise LLMError("No Anthropic API key configured — add one on the 'LLM Integration' page.")
+        secret = pool_secret(self.name) if has_pool(self.name) else None
+        if secret:
+            return self.client_for(secret)
+        if self._client is None:
+            raise LLMError("No Anthropic API key configured — add one on the 'LLM Integration' page.")
         return self._client
+
+    def client_for(self, secret: str) -> Any:
+        import anthropic
+        client = self._keyed.get(secret)
+        if client is None:
+            kwargs: dict[str, Any] = {"api_key": secret, "max_retries": 0}
+            if self.cfg.timeout_s:
+                kwargs["timeout"] = float(self.cfg.timeout_s)
+            client = self._keyed[secret] = anthropic.AsyncAnthropic(**kwargs)
+        return client
+
+    async def list_model_ids(self, secret: str) -> list[str]:
+        """The free key check: the model list (Anthropic pages it twenty at a time, so ask for 1,000) costs no
+        generation request."""
+        try:
+            return sorted({m.id async for m in self.client_for(secret).models.list(limit=1000)})
+        except Exception as exc:
+            raise self._error(exc) from exc
 
     async def list_models(self) -> list[dict[str, Any]]:
         try:
@@ -78,6 +111,8 @@ class ClaudeProvider(ChatProvider):
 
     def _error(self, exc: Exception) -> LLMError:
         import anthropic
+        if isinstance(exc, LLMError):
+            return exc
         if isinstance(exc, anthropic.APIStatusError):
             code = exc.status_code
             retry = exc.response.headers.get("retry-after") if exc.response is not None else None
@@ -90,8 +125,13 @@ class ClaudeProvider(ChatProvider):
             msg = (err.get("message") if isinstance(err, dict) else None) or getattr(exc, "message", "") or str(exc)
             if isinstance(exc, anthropic.AuthenticationError):
                 msg = f"the API key was rejected ({msg})"
+            try:
+                detail = json.dumps(body, default=str)[:2000] if body is not None else ""
+            except (TypeError, ValueError):
+                detail = str(body)[:2000]
             return LLMError(f"Claude error {code}: {msg}", code,
-                            transient=code in (408, 409, 429, 500, 502, 503, 504, 529), retry_after=retry_after)
+                            transient=code in (408, 409, 429, 500, 502, 503, 504, 529), retry_after=retry_after,
+                            detail=detail)
         if isinstance(exc, (anthropic.APIConnectionError, anthropic.APITimeoutError)):
             return LLMError(f"Claude request failed: {exc}", transient=True)
         return LLMError(f"Claude request failed: {exc}")
@@ -105,6 +145,9 @@ class ClaudeProvider(ChatProvider):
                 kwargs["system"] = [{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}]
             if model not in self._no_effort:
                 kwargs["output_config"] = {"effort": _EFFORT.get(thinking, "medium")}
+            temperature = TEMPERATURE.get()
+            if temperature is not None and model not in self._no_temperature:
+                kwargs["temperature"] = temperature
             if model in FALLBACK_MODELS and model not in self._no_fallback:
                 kwargs["betas"] = [FALLBACK_BETA]
                 kwargs["fallbacks"] = "default"
@@ -119,6 +162,9 @@ class ClaudeProvider(ChatProvider):
             except Exception as exc:
                 err = self._error(exc)
                 text = err.message.lower()
+                if err.code == 400 and "temperature" in kwargs and "temperature" in text:
+                    self._no_temperature.add(model)
+                    continue
                 if err.code == 400 and "output_config" in kwargs and "effort" in text:
                     self._no_effort.add(model)
                     continue

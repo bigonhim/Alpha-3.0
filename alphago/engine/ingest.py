@@ -89,6 +89,7 @@ def apply_alpha_json(row: Alpha, data: dict[str, Any], origin: str | None = None
         row.self_corr = is_.get("selfCorrelation")
     if is_.get("prodCorrelation") is not None:
         row.prod_corr = is_.get("prodCorrelation")
+    _apply_vault_fields(row, data, settings, is_)
     os_ = data.get("os")
     if os_:
         row.os = os_
@@ -102,6 +103,44 @@ def apply_alpha_json(row: Alpha, data: dict[str, Any], origin: str | None = None
     reverdict(row)
     row.raw = {k: v for k, v in data.items() if k not in ("is", "os", "train", "test", "prod")}
     return row
+
+
+def _apply_vault_fields(row: Alpha, data: dict[str, Any], settings: dict[str, Any], is_: dict[str, Any]) -> None:
+    """Fields alpha-harness keeps per alpha: settings it did not store, the train/test halves, BRAIN's verdict.
+
+    The train/test columns are written only when the body carries them, so a listing without them never blanks
+    stored values."""
+    from ..brain.platform import brain_verdict
+    for attr, key in (("instrument_type", "instrumentType"), ("language", "language"),
+                      ("pasteurization", "pasteurization"), ("nan_handling", "nanHandling"),
+                      ("max_trade", "maxTrade"), ("max_position", "maxPosition"), ("test_period", "testPeriod"),
+                      ("simulation_mode", "simulationMode")):
+        if settings.get(key) is not None:
+            setattr(row, attr, str(settings[key]))
+    if settings.get("endDate"):
+        row.end_date = str(settings["endDate"])[:10]
+    kind = str(data.get("type") or row.type or "REGULAR").upper()
+    if kind == "REGULAR" and str(settings.get("region") or "").upper() == "ALL":
+        kind = "RA_PARENT"
+    row.sim_type = "RA_CHILD" if data.get("parent") or data.get("parentId") else kind
+    if is_.get("pnl") is not None:
+        row.is_pnl = is_.get("pnl")
+    train, test = data.get("train"), data.get("test")
+    if isinstance(train, dict) and train:
+        row.train_sharpe, row.train_fitness = train.get("sharpe"), train.get("fitness")
+    if isinstance(test, dict) and test:
+        row.test_sharpe, row.test_fitness = test.get("sharpe"), test.get("fitness")
+        row.test_turnover = test.get("turnover", row.test_turnover)
+        if test.get("startDate"):
+            row.test_start = str(test["startDate"])[:10]
+    if row.code:
+        try:
+            from ..fastexpr import parse
+            from ..labs.fastexpr import operator_count
+            row.op_count = operator_count(parse(row.code))
+        except Exception:
+            pass
+    row.brain_verdict = brain_verdict(row.checks, row.simulation_mode)
 
 
 async def upsert_alpha(data: dict[str, Any], *, candidate_id: int | None = None, origin: str = "app") -> Alpha:

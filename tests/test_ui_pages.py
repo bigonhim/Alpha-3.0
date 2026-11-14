@@ -26,6 +26,16 @@ PAGES = [
     ("/aqp", ["Alpha Quality Project", "Suggest the best 3", "Write descriptions (AI)"]),
     ("/spc", ["Generate with AI, check, and submit", "Gate settings", "Submit settings"]),
     ("/", ["Submittable Alphas"]),
+    # screens ported from alpha-harness
+    ("/labs", ["Research Labs"]),
+    ("/tools", ["Tools"]),
+    ("/pool", ["Alpha Pool"]),
+    ("/portfolio", ["Portfolio"]),
+    ("/data", ["Data Explorer"]),
+    ("/pyramids", ["Pyramids"]),
+    ("/competitions", ["Competitions"]),
+    ("/live", ["Live Simulations"]),
+    ("/assistant", ["AI Assistant"]),
 ]
 
 

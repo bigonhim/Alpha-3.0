@@ -79,8 +79,12 @@ python -m venv .venv
 
 | Tab | Purpose |
 |---|---|
-| **Dashboard** | Today at a glance: submittable alphas, simulations left, sent today, queued and busy slots, the AI research counters, and the live activity feed. |
+| **Dashboard** | Today at a glance: a one-line summary of the day (simulations left that would go unused; ~ while estimated), simulations left with the reset countdown, sent today, submittable alphas, a **Getting started** checklist, **Submitted this quarter** and pyramids completed (from BRAIN), **Operators used** this quarter (unused first), **Work in flight** per task with Pause, the AI research counters and the live activity feed. |
+| **Live Simulations** | What each of the 8 simulation cores is doing now: batch, task, BRAIN's progress, elapsed time and each alpha in the batch. **Cancel** stops a run on BRAIN; if BRAIN refuses, **Free its core** ends it here. The header shows one tile per core, and why work is paused when it is. |
 | **Simulation Matrix** | One or more expressions × several settings (universe, neutralization, decay, truncation and more). Shows the quota cost first. Runs are packed into multi-simulations of 10 across the 8 slots. *Template* mode fills `{field}`, `{window}` and `{group}`. The heatmap shows whether an alpha is a robust plateau or a lucky spike. |
+| **Research Labs** | Tasks that search for alphas on their own share of the cores (a task waits until its cores are free). **Search**: a TPE search over operator shapes, fields, lookbacks, neutralizations and decays, trained on all but the last two years. **Template**: your expression with `$variables` (fields, values or operators), every combination searched; saved templates and a gallery. **Evolution**: breeds better alphas from seeds you pick (or **Auto select**), parents kept uncorrelated. **Power Pool**: an AI writes Power-Pool-sized alphas (≤ 8 operators, ≤ 3 fields) dataset by dataset. **Super Alpha**: every selection × combo recipe. **Tasks** lists every lab task (Run, Pause, Stop, resize, rename, remove) with ranked results; **Submittable** lists every submittable alpha the labs found. Repeats are answered free from alphas already simulated. |
+| **Tools** | Work on one alpha you already have. **Settings Sampler**: every market and setting it can run in (Truncation Agent, Max Trade / Max Position). **Correlation Breaker**: re-shapes that keep its settings, to pass Production Correlation, ranked by what has worked for you. **Fields Sampler**: the same idea on other fields (Sweep, Similar, Buckets, Fast D1). **Paste Alphas**: paste an AI's answer and every alpha in it is checked and simulated; results copy back. **Copy** alphas as Markdown for an AI, and **write a Power Pool description**. |
+| **Data Explorer** | Every field of every synced market: smart search, filters (coverage, users, alphas, pyramid multiplier, date added, region-agnostic, Fast D1), the Category → Subcategory → Dataset tree, where each field is available, and **Copy Data Fields** / **Download as Markdown** outlines for an AI. |
 | **Dataset Intelligence** | Datasets rated by AI for **Single / Double / Interaction** research, with top recommendations, a themes chart and usage/theme filters, blended with your own hit rate. Per dataset: AI brief, fields, idea generation, **Research task…**. |
 | **Alpha Autopilot** | Three modes: **Manual**, **Assisted** (default; proposed tasks wait for approval) and **Full Autopilot** (opt-in, within a daily simulation cap). Plans research tasks with a reason, shows the current task's stage bar and what was left out on purpose. The v1 AI idea batches (with approval) are in a collapsible section. |
 | **Genius AI** | Your quarterly Genius progress: signals, pyramids lit, combined performance and the tie-breakers. Includes a pyramid map, pyramid candidates, and an AI-written plan of concrete goals you can launch as targeted Autopilot runs. |
@@ -94,14 +98,19 @@ python -m venv .venv
 | **Python Alphas** | Alphas written in Python. Support is read from BRAIN's allowed `language` values; nothing is simulated unless your account offers a Python language. **Check code** (free): syntax, size, no file / network / process / dynamic-code access. **Write with AI** against the reference you paste from BRAIN's docs (or translate a FASTEXPR expression), fixing code that fails the check; **Write & simulate in the background** does it for a list of ideas. Results land on **Alphas**. |
 | **Super Alphas** | Follows your Super Alpha guide: rename about 20 ACTIVE alphas to a code (for example `321`), select them with `name == '321'`, combine with `1`, preview, simulate, write the two descriptions (100+ characters each), then a confirmed submit. |
 | **Tasks** | Research tasks (Search Lab, Double dataset · Pair, Interaction). **Screening before simulating** (also on Alpha Autopilot) puts every screen on the UI, all on by default: field screening with its thresholds, leaving out copies of submitted alphas, the daily cap per economic idea, the AI self-check and variants per shape; **Reset to defaults (all on)**. Each first **screens the fields**: one simulation per field, keeping only fields that showed a signal, sign-flipped when negative. Templates run with windows suited to the data category, in the order your own hit history ranks their families. Shows cores, progress, best Sharpe, pause/stop/delete, **Run All / Stop All**, the Autopilot's daily plan, plus the simulation queue and background jobs. |
-| **Alphas** | Every alpha, from the app or synced. Double-click for details: metrics, check badges, PnL and yearly charts, self-correlation, optimise, properties and AI description, `/check`, and **Submit…**. |
+| **Alphas** | Every alpha, from the app or synced. Double-click for details: BRAIN's own check messages grouped by result, the test period hidden until you show it, TRAIN / TEST / IS periods, yearly and OS tables, PnL / Sharpe / Turnover chart, self / Power Pool / production correlation with the correlated alphas, before / after performance, region-agnostic children, optimise, properties and AI description, **Flip Sign**, `/check`, and **Submit…**. Step through the list with previous / next. |
+| **Alpha Pool** | Every alpha you have, filtered and sorted locally: bounds on every figure, tags, dates, train / test Sharpe, **after-cost** Sharpe, K-ratio, long/short imbalance, correlations (also as angles) and BRAIN's own counts. **Add Tag** to many alphas, **Import by tag**, saved **Tag groups**, **Copy as Markdown**. **Submittable**: a shortlist of up to 5 that held up on the test period and do not correlate. **Power Pool**: Power Pool correlation measured locally (clear / beats / blocked), a submission order, and batch Production Correlation. |
+| **Portfolio** | Any set of alphas as one equal-weight book: IS / train / test and after-cost figures, yearly table, curves, the correlation grid and each alpha's contribution (incremental Sharpe, portfolio correlation). Pick alphas with a **Selection Expression** (`sharpe > 1.5; turnover < 30%`), facets and a pyramid grid. |
+| **Pyramids** | Pyramid multipliers and your alphas per pyramid, for any quarter or all time, ranked; click a synced cell to explore its fields. |
+| **Competitions** | Ongoing competitions with days left, your rank and alphas, and past ones. |
 | **Research History** | Autopilot runs and the idea journal (hypothesis → verdict). Failed shapes become the AI's "don't repeat" memory. |
 | **Analytics** | Simulations per day, success rate, Sharpe distribution, most frequent failing checks, yield by generator and dataset, and LLM usage. |
 | **Quota Planner** | What 100 simulations have bought so far, per dataset and strategy: promising, strong, *passed BRAIN's check* and submitted per 100, with 80% ranges. Suggests a split of a quota (most where submittable alphas came from, 20% exploring) and can create the research tasks as *planned*, waiting for your approval. |
 | **Health** | Per AI provider and day: calls, rate limits, timeouts, unavailable models, server errors, latency, tokens; per model error rates; BRAIN throttles (429), concurrency rejections, 5xx and network errors, quota used; **which repairs work** per failing check; how close the self-correlation estimate has been to BRAIN. |
 | **Audit Log** | Every action the app took on your BRAIN account (simulations sent, checks, submissions, property/tag/Osmosis changes, sign-ins), who triggered it (you, a confirmed job, task N, Autopilot) and how many simulations it spent. Filters and CSV export; append-only. |
-| **LLM Integration** | Active provider (Gemini, Claude, OpenAI / compatible, Ollama), its key or server, models per role, thinking level, call budget, rate-limit status, **fallback providers**, the **AI self-check** switch, the **model tournament** (scoreboard, lock the winner) and the prompt-template editor with **versions** (results per version, diff, restore). |
-| **Sync with BRAIN** | Login (including Persona), allowed settings, and catalogue, alphas and programs syncs, with last-synced times. **Email alerts** (SMTP) and **Run in the background** (Start with Windows, keep awake). |
+| **AI Assistant** | Talk through an idea; the assistant picks fields from your catalogue to try it with, then **Use in Search Lab**. Conversations are kept. |
+| **LLM Integration** | Several **keys per provider** (rotated by what each has left; paid keys need a daily cap), **models** with their per-minute / per-day limits, the **budget** used today per model, providers (adds Google AI Studio, Groq, Cerebras, NVIDIA, Mistral and Hugging Face), active provider (Gemini, Claude, OpenAI / compatible, Ollama), its key or server, models per role, thinking level, call budget, rate-limit status, **fallback providers**, the **AI self-check** switch, the **model tournament** (scoreboard, lock the winner) and the prompt-template editor with **versions** (results per version, diff, restore). |
+| **Sync with BRAIN** | Login (including Persona), allowed settings, and catalogue, alphas and programs syncs, with last-synced times. **BRAIN Datasets** downloads every market your account offers (one request per market), shown as a Region × Universe matrix. **Email alerts** (SMTP) and **Run in the background** (Start with Windows, keep awake). |
 
 **Verdicts used throughout**
 
@@ -122,6 +131,8 @@ Limits always come from BRAIN's own check results. The app's built-in thresholds
 2. **BRAIN check on every strong alpha** (up to `research.check_cap`, 15 per task; a check costs no simulations), most different first: lowest estimated self-correlation (from daily PnL against your submitted alphas) and no two near-identical PnL twins in a row.
 3. **After a pass:** robustness test (3 simulations; a badge, not a demotion), walk-forward (recent 20% of in-sample ÷ the first 80%), a search-adjusted (deflated) Sharpe from how many ideas the search tried, and — once 20 of your submitted alphas have BRAIN OS numbers — a predicted OS/IS ratio. All advisory.
 4. **A correlation failure** gets several rounds aimed at what it collides with (`engine/decorrelate.py`): beat the correlated alpha's Sharpe by 10% (a community-reported rule, unverified; BRAIN's check decides), remove the overlap with `regression_neut`, swap in less-crowded fields, or change horizon or conditioning. Any other failure from BRAIN's check goes back to the repair loop.
+
+**Figures as BRAIN computes them.** Train / test, after-cost, K-ratio, portfolio and correlation figures are rebuilt from each alpha's daily PnL and turnover with BRAIN's own rules: 250 days, a $20M book, a 12.5% turnover floor in Fitness, correlation over the last four calendar years on at least 250 shared days, and the days BRAIN counts after its last exported row.
 
 Before simulating, generated ideas that copy a submitted alpha's shape and fields are left out, each economic idea (momentum, reversal, value, …) is capped per day at `research.cluster_share` of the simulations, and the AI critiques its own batch (`llm.self_check`).
 
@@ -148,6 +159,9 @@ Practitioner data (about 830 simulations per live alpha) shows that **correlatio
 - **Background:** BRAIN's *Consultant Do's and Don'ts* lists "using automation to generate Alpha ideas" as a research don't. There is also a community report of a fully automated account being locked.
   - Full Autopilot is behind a warning you must accept.
   - Please read the current Do's and Don'ts on the platform. Which mode you run is your decision.
+- **A simulation is never paid for twice.** If BRAIN does not answer a simulation start (a timeout or a server error), it may still have run, so it is not sent again. Those alphas show as *orphaned* and are looked up in your alpha list on BRAIN; only if they never appear within 30 minutes are they queued again (at most twice).
+- **The daily limit stops the queue** until BRAIN's reset instead of being retried. When BRAIN rejects one alpha in a batch, only that alpha is rejected.
+- **No sign-in loops.** If BRAIN refuses your stored login, AlphaGo stops signing in on its own until you sign in again, and background sign-ins happen at most once an hour, so repeated attempts cannot lock your account.
 - **Credentials.** They are stored only in Windows Credential Manager and are never written to logs or the database.
 - **Accountability.** Every action on your BRAIN account is in the **Audit Log**. Email alerts carry alpha IDs and counts only, never expressions or credentials, and are off until you switch them on.
 
@@ -162,6 +176,7 @@ These details are not publicly documented, so the app handles them as it goes ra
 | **SUPER payload shape** | Selection and combo at the top level, or nested. The app tries one and falls back to the other on rejection, then remembers which works. |
 | **Allowed settings** | Regions, universes, delays and neutralizations come from `OPTIONS /simulations` for your account. A built-in table is used until you load them. |
 | **Quota and reset time** | Read from the `X-Ratelimit-*` headers. |
+| **Sign-in captcha** | BRAIN's ALTCHA proof-of-work is solved automatically when BRAIN asks for one. Your session is kept in Windows Credential Manager and resumed on the next start, so you sign in (and verify) less often. |
 | **SPC form rules** | Not public. Enter the rules under **Form rules** (required fields, row limits, weight and long/short fields). |
 | **Themes** | No theme API. Theme datasets come from `theme=true` searches, matches from the MATCHES_THEMES check; dates and multipliers are typed in from the announcement. |
 | **Python alphas** | No public spec. Support comes from the `language` choices in `OPTIONS /simulations`; the AI writes code against the reference you paste. |
@@ -184,6 +199,11 @@ These details are not publicly documented, so the app handles them as it goes ra
 | LLM 429 or budget reached | Wait. Pacing recovers automatically. Raise the daily budget on **LLM Integration**, use a paid tier, or switch to a local Ollama model (not budgeted). |
 | "Ollama is not reachable" | Start Ollama (it runs at `http://localhost:11434` by default), or fix the server URL on **LLM Integration**. |
 | Ollama warns the prompt was cut | Raise **Context window** on **LLM Integration**, or use a model with a longer context. |
+| Alphas marked *orphaned* | BRAIN did not answer a start. They are matched against your alpha list within minutes; nothing is sent again unless BRAIN never made them. |
+| "BRAIN refused this email and password … will not retry" | Check the credentials on **Sync with BRAIN** and sign in there; automatic sign-in resumes after that. |
+| "This identity check expired" | Start a new check from **Sync with BRAIN**. |
+| A lab task stays **Queued** | It waits until its cores are free (8 in total). Pause another task, or give this one fewer cores. |
+| An AI provider says its budget is used | Add another key on **LLM Integration → Keys**, or let the fallback providers take over. |
 | Native window does not open | Install the WebView2 runtime, or run with `--web`. |
 | Anything else | See `%APPDATA%\AlphaGo\logs\alphago.log`. |
 
@@ -192,7 +212,7 @@ These details are not publicly documented, so the app handles them as it goes ra
 ## 8. For developers
 
 ```powershell
-.venv\Scripts\python.exe -m pytest -q          # 340+ tests: BRAIN client (mocked), FASTEXPR, pipeline, PnL/Osmosis/Power Pool, SPC, AQP, themes, Python alphas, UI pages
+.venv\Scripts\python.exe -m pytest -q          # 650+ tests: BRAIN client (mocked), engine safety, FASTEXPR, metrics, labs, tools, pool, catalogue, AI, SPC, AQP, UI pages
 .venv\Scripts\ruff.exe check alphago tests
 ```
 
@@ -205,5 +225,11 @@ These details are not publicly documented, so the app handles them as it goes ra
 | `alphago/knowledge/` | Operator signatures, templates, and the LLM knowledge pack. |
 | `alphago/llm/` | LLM router (`llm`) and providers — Gemini, Claude, OpenAI / compatible, OpenRouter (live free-model ranking and rotation), Ollama — with structured output, adaptive pacing and the daily budget; schemas, prompts. |
 | `alphago/engine/` | Simulator service (per-task cores), evaluator, generators, optimiser, Autopilot, research tasks (with field screening), template-family learning (`families.py`), daily PnL, portfolio logic (Osmosis plan/review, Power Pool pick), OOS outlook, SPC workbench (`spc.py`) and generation / gates / guarded submission (`spc_auto.py`), Alpha Quality Project (`aqp.py`), BRAIN themes (`themes.py`), Python alphas (`python_alpha.py`), programs, Super Alphas, stats. |
+| `alphago/labs/` | Lab task runner (`runner.py`: cores, trials, dedup, scoring, refusals, lifecycle) and the Search, Template, Evolution, LLM Power Pool and Super Alpha labs; BRAIN's counting rules (`fastexpr.py`). |
+| `alphago/tools/` | Settings Sampler, Correlation Breaker, Fields Sampler (with field buckets), Paste Alphas, Copy Alphas, description writer. |
+| `alphago/pool/` | Stored-alpha queries, tags and tag groups, submittable shortlist, local Power Pool and self correlation, submission order, Selection Expression, portfolio. |
+| `alphago/catalog/` | All-markets catalogue sync, field search (SQLite FTS5), facets, outlines, pyramids, competitions, quarter, today. |
+| `alphago/ai/` | Key pool and rotation, per-model budget ledger, model registry, providers, chat assistant. |
+| `brain/platform.py`, `engine/metrics.py`, `engine/series.py`, `engine/reconcile.py` | BRAIN rules and constants; BRAIN-exact figures; daily PnL and turnover series; settling unanswered simulations. |
 | `alphago/jobs/` | Persistent background job queue. |
 | `alphago/ui/` | NiceGUI pages (one module per tab), layout, theme, shared components. |

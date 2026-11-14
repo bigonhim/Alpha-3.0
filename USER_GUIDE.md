@@ -12,6 +12,23 @@ It is a local, single-user app:
 - Every alpha, simulation and task is kept in a local SQLite database (alphago.db), and your settings in settings.json, both in `%APPDATA%\AlphaGo`.
 - Only BRAIN and the AI provider you chose are contacted, plus Yahoo Finance when you test an SPC prompt (tickers and dates only). With a local Ollama model, AI prompts never leave your PC.
 
+### What's new on 14 November 2026
+
+Everything the alpha-harness workstation offers is now in AlphaGo, in AlphaGo's own pages:
+
+- **Research Labs** (new page). Tasks that search for alphas: **Search** (a TPE search over operator shapes, fields, lookbacks and settings), **Template** (your expression with `$variables`; saved templates and a gallery), **Evolution** (breeds better alphas from seeds), **Power Pool** (an AI writes Power-Pool-sized alphas dataset by dataset) and **Super Alpha** (every selection × combo recipe). Each task gets its own cores and waits until they are free. A repeat is answered free from the alpha already simulated, and is not counted against the task.
+- **Tools** (new page) for one alpha you already have: **Settings Sampler**, **Correlation Breaker** (re-shapes that keep its settings), **Fields Sampler**, and **Paste Alphas** (paste an AI's answer; each alpha in it is checked and simulated, and the results copy back).
+- **Alpha Pool** and **Portfolio** (new pages): filters on every figure, train / test and after-cost Sharpe, K-ratio, tags and tag groups, a submittable shortlist, Power Pool correlation measured locally with a submission order, and any set of alphas analysed as one portfolio.
+- **Data Explorer**, **Pyramids**, **Competitions**, **Live Simulations** and **AI Assistant** (new pages). **Sync with BRAIN → BRAIN Datasets** now downloads every market at once.
+- **The alpha page** shows BRAIN's own check messages, train / test / IS periods (the test period hidden until you show it), the PnL / Sharpe / Turnover chart, correlations and before / after performance, plus **Flip Sign** and **Copy as Markdown**.
+- **The window**: one tile per simulation core in the header, the sidebar grouped into sections, and **Ctrl+K** to jump to any page, alpha, task or field search.
+- **AI**: several keys per provider, rotated by what each has left, with a budget per model. New providers: Google AI Studio, Groq, Cerebras, NVIDIA, Mistral and Hugging Face.
+- **Safer with your quota and account.**
+  - A simulation BRAIN did not answer is looked up on BRAIN instead of being sent again, so it is never paid for twice.
+  - BRAIN's daily limit pauses the queue until the reset.
+  - A refused sign-in is not retried on its own.
+  - BRAIN's sign-in captcha is solved for you, and your session is resumed after a restart.
+
 ### What's new on 11 November 2026
 
 - **AlphaGo.bat.** Double-click it to install (the first time) and start AlphaGo. See [section 2](#2-install-start-and-close).
@@ -740,6 +757,11 @@ BRAIN's *Consultant Do's and Don'ts* lists "using automation to generate Alpha i
 | Alpha details | **Optimise** | Up to 11 |
 | Tasks, Alphas, Alpha details | **Repair near misses…**, **Repair selected…**, **Repair…** | Up to the budget you set (150 by default) |
 | Super Alphas | **Simulate SuperAlpha** | 1, sent directly (not held back by the reserve or **Stop all**) |
+| Research Labs, Tools | **Run now**, or **Run** on a task in the list | Up to the task's simulations (repeats answered free are not counted); **Add to Tasks** alone spends nothing |
+| Research Labs → Tasks | **Run All** | The same, for every task not yet started |
+| Research Labs → Evolution | **Auto select** seeds | None: it only downloads daily PnL |
+| Alpha details | **Flip Sign** → **Flip Sign** | 1 |
+| Alpha Pool, Portfolio, Data Explorer, Pyramids | Analyse, Download PnL, Sync | None: they read from BRAIN only |
 
 ### Buttons that change your BRAIN account
 
@@ -756,6 +778,8 @@ BRAIN's *Consultant Do's and Don'ts* lists "using automation to generate Alpha i
 | Super Alphas | **Write descriptions (AI)** | No, saves to BRAIN, then shows you the text |
 | SPC Lab | **Submit to BRAIN** → **Submit** | Yes, and only after every check passes |
 | Alpha Quality Project | **Tag AQP… & save on BRAIN** → **Apply** | Yes. Adds the cycle tag and sets the description; refuses past 3 alphas a cycle |
+| Alpha Pool → Stored Alphas | **Add Tag** | No, adds the tags to the ticked alphas on click (existing tags are kept; `PowerPoolSelected` is refused, because once added an alpha stays in the pool's correlation checks) |
+| Tools → Copy and Describe | **Write description (AI)** | You review the text before saving it with **Properties** |
 
 **What leaves your PC:** BRAIN API calls; prompts to the AI provider you chose, unless it is a local Ollama model (the knowledge pack of rules, your operators and templates; dataset and field descriptions; for idea generation, your best and rejected alpha expressions with their metrics; for refinement or descriptions, the alpha's expression and metrics; for the research and Genius plans, account statistics; Osmosis Review sends numbers only); for SPC **Test PnL**, ticker symbols, the benchmark ticker and dates to Yahoo Finance; for the OpenRouter provider, a read of OpenRouter's public model list; and for SPC dry runs, the prompt text to your AI provider.
 
